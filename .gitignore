@@ -1,0 +1,43 @@
+# Dependencies
+**/node_modules/
+
+# Build output
+**/dist/
+**/.next/
+**/.next-*/
+**/.expo/
+**/web-build/
+**/coverage/
+**/*.tsbuildinfo
+
+# Expo / Metro
+**/.metro-health-check*
+**/expo-env.d.ts
+
+# Native build artifacts
+/urnway-mobile/android/
+/urnway-mobile/ios/
+**/.kotlin/
+**/*.orig.*
+**/*.jks
+**/*.p8
+**/*.p12
+**/*.key
+**/*.mobileprovision
+
+# Environment files
+**/.env
+**/.env.local
+**/.env.*.local
+!**/.env.example
+
+# Generated SQL and caches
+**/drizzle/*.sql
+**/npm-debug.*
+**/yarn-debug.*
+**/yarn-error.*
+
+# OS files
+**/.DS_Store
+**/*.pem
+
