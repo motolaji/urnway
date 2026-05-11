@@ -39,6 +39,10 @@ function normalizeBaseUrl(value: string | undefined) {
 
   const trimmed = value.trim().replace(/\/+$/, '');
 
+  if (trimmed.startsWith('/')) {
+    return trimmed;
+  }
+
   try {
     return new URL(trimmed).toString().replace(/\/+$/, '');
   } catch {
@@ -52,6 +56,10 @@ function resolveDevelopmentApiBaseUrl(apiBaseUrl: string) {
   }
 
   try {
+    if (apiBaseUrl.startsWith('/')) {
+      return apiBaseUrl;
+    }
+
     const currentHost = window.location.hostname;
 
     if (!currentHost || ["localhost", "127.0.0.1"].includes(currentHost)) {
