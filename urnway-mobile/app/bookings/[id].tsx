@@ -149,7 +149,11 @@ export default function BookingDetailScreen() {
             {booking?.mode === "hotel" ? "Hotel booking" : "Flight booking"}
           </Text>
           <Text variant="bodySmall" color="secondary">
-            Confirmed booking first. Flights continue into ticket issuing; hotels stay as booking records for now.
+            {booking?.provider.code === "duffel"
+              ? "Real Duffel flight holds stay unticketed until provider payment is completed."
+              : booking?.provider.code === "liteapi"
+              ? "Real liteAPI stays are confirmed through the selected provider-backed hotel rate."
+              : "Confirmed booking first. Flights continue into ticket issuing; hotels stay as booking records for now."}
           </Text>
         </View>
       </View>
@@ -186,6 +190,8 @@ export default function BookingDetailScreen() {
                 variant={
                   booking.status === "cancelled"
                     ? "error"
+                    : booking.status === "held"
+                    ? "warning"
                     : booking.mode === "hotel"
                     ? "info"
                     : booking.ticket.issued
@@ -197,6 +203,8 @@ export default function BookingDetailScreen() {
                   ? booking.status === "cancelled"
                     ? "Cancelled"
                     : "Stay confirmed"
+                  : booking.status === "held"
+                  ? "Held"
                   : booking.ticket.issued
                   ? "Ticket issued"
                   : booking.status === "cancelled"
@@ -252,6 +260,28 @@ export default function BookingDetailScreen() {
             </View>
             <View style={styles.detailRow}>
               <Text variant="caption" color="tertiary">
+                Provider
+              </Text>
+              <Text variant="bodySmall">
+                {booking.provider.code === "duffel"
+                  ? "Duffel"
+                  : booking.provider.code === "liteapi"
+                  ? "liteAPI"
+                  : "Urnway demo"}
+              </Text>
+            </View>
+            {booking.provider.holdExpiresAt ? (
+              <View style={styles.detailRow}>
+                <Text variant="caption" color="tertiary">
+                  Hold expires
+                </Text>
+                <Text variant="bodySmall">
+                  {new Date(booking.provider.holdExpiresAt).toLocaleString("en-US")}
+                </Text>
+              </View>
+            ) : null}
+            <View style={styles.detailRow}>
+              <Text variant="caption" color="tertiary">
                 {booking.mode === "hotel" ? "Room tier" : "Cabin"}
               </Text>
               <Text variant="bodySmall">
@@ -276,6 +306,17 @@ export default function BookingDetailScreen() {
                   : booking.travel?.duration}
               </Text>
             </View>
+            {booking.tripId ? (
+              <Button
+                variant="secondary"
+                fullWidth
+                onPress={() => router.push(`/trips/${booking.tripId}`)}
+                style={styles.cta}
+                leftIcon={<Ionicons name="map-outline" size={18} color={colors.brand.pressed} />}
+              >
+                View linked trip
+              </Button>
+            ) : null}
           </Card>
 
           <Card variant="default" style={styles.sectionCard}>

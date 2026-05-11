@@ -1,17 +1,20 @@
 import { Ionicons } from "@expo/vector-icons";
 import { router, useLocalSearchParams } from "expo-router";
 import { useEffect, useState } from "react";
-import { ActivityIndicator, StyleSheet, View } from "react-native";
+import { ActivityIndicator, Pressable, StyleSheet, View } from "react-native";
 
 import BlurScrollScreen from "@/components/blur-scroll-screen";
+import DatePickerSheet from "@/components/date-picker-sheet";
+import LocationPickerSheet from "@/components/location-picker-sheet";
 import { Badge, Button, Card, Chip, IconButton, Input, Text } from "@/components/ui";
-import { colors, spacing } from "@/constants/design-tokens";
+import { borderRadius, colors, spacing, typography } from "@/constants/design-tokens";
 import {
   ApiError,
   createTripExpense,
   createTripItineraryItem,
   fetchTrip,
   generateTripItineraryDraft,
+  type LocationSuggestion,
   type GeneratedTripItineraryDraft,
   type Trip,
   type TripExpense,
@@ -77,6 +80,18 @@ function formatItineraryDate(date: string) {
   });
 }
 
+function formatDateFieldValue(date: string) {
+  if (!date.trim()) {
+    return "";
+  }
+
+  return new Date(`${date}T12:00:00Z`).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
 function sortItineraryItems(items: TripItineraryItem[]) {
   return [...items].sort((left, right) => {
     const dateCompare = left.date.localeCompare(right.date);
@@ -137,6 +152,12 @@ export default function TripDetailScreen() {
   const [isSavingExpense, setIsSavingExpense] = useState(false);
   const [isGeneratingDraft, setIsGeneratingDraft] = useState(false);
   const [draftActionId, setDraftActionId] = useState<string | "all" | null>(null);
+  const [showDatePicker, setShowDatePicker] = useState<
+    "startDate" | "endDate" | "itineraryDate" | "expenseDate" | null
+  >(null);
+  const [showLocationPicker, setShowLocationPicker] = useState<
+    "destination" | "itineraryLocation" | null
+  >(null);
 
   function resetItineraryForm(defaultDate = trip?.startDate ?? "") {
     setEditingItineraryItemId(null);
@@ -154,6 +175,30 @@ export default function TripDetailScreen() {
     setExpenseAmount("");
     setExpenseDate(defaultDate);
     setExpenseNote("");
+  }
+
+  function applyLocationSelection(
+    field: "destination" | "itineraryLocation",
+    suggestion: LocationSuggestion
+  ) {
+    if (field === "destination") {
+      setDestination(suggestion.label);
+      return;
+    }
+
+    setItineraryLocation(suggestion.label);
+  }
+
+  function applyTypedLocation(
+    field: "destination" | "itineraryLocation",
+    value: string
+  ) {
+    if (field === "destination") {
+      setDestination(value);
+      return;
+    }
+
+    setItineraryLocation(value);
   }
 
   function applyItineraryItemToTrip(savedItem: TripItineraryItem) {
@@ -736,24 +781,65 @@ export default function TripDetailScreen() {
               value={title}
               onChangeText={setTitle}
             />
-            <Input
-              label="Destination"
-              value={destination}
-              onChangeText={setDestination}
-            />
+            <View style={styles.fieldGroup}>
+              <Text variant="label">Destination</Text>
+              <Pressable
+                style={styles.pickerField}
+                onPress={() => setShowLocationPicker("destination")}
+              >
+                <Ionicons
+                  name="location-outline"
+                  size={18}
+                  color={colors.text.tertiary}
+                />
+                <Text
+                  variant="body"
+                  style={destination ? styles.pickerFieldText : styles.pickerFieldPlaceholder}
+                  numberOfLines={1}
+                >
+                  {destination || "Choose destination or address"}
+                </Text>
+              </Pressable>
+            </View>
             <View style={styles.inlineInputs}>
-              <Input
-                label="Start date"
-                value={startDate}
-                onChangeText={setStartDate}
-                containerStyle={styles.inlineInput}
-              />
-              <Input
-                label="End date"
-                value={endDate}
-                onChangeText={setEndDate}
-                containerStyle={styles.inlineInput}
-              />
+              <View style={[styles.fieldGroup, styles.inlineInput]}>
+                <Text variant="label">Start date</Text>
+                <Pressable
+                  style={styles.pickerField}
+                  onPress={() => setShowDatePicker("startDate")}
+                >
+                  <Ionicons
+                    name="calendar-outline"
+                    size={18}
+                    color={colors.text.tertiary}
+                  />
+                  <Text
+                    variant="body"
+                    style={startDate ? styles.pickerFieldText : styles.pickerFieldPlaceholder}
+                  >
+                    {formatDateFieldValue(startDate) || "Select start date"}
+                  </Text>
+                </Pressable>
+              </View>
+              <View style={[styles.fieldGroup, styles.inlineInput]}>
+                <Text variant="label">End date</Text>
+                <Pressable
+                  style={styles.pickerField}
+                  onPress={() => setShowDatePicker("endDate")}
+                >
+                  <Ionicons
+                    name="calendar-outline"
+                    size={18}
+                    color={colors.text.tertiary}
+                  />
+                  <Text
+                    variant="body"
+                    style={endDate ? styles.pickerFieldText : styles.pickerFieldPlaceholder}
+                  >
+                    {formatDateFieldValue(endDate) || "Select end date"}
+                  </Text>
+                </Pressable>
+              </View>
             </View>
             <Input
               label="Budget (MUSD)"
@@ -861,13 +947,25 @@ export default function TripDetailScreen() {
                 placeholder="24"
                 containerStyle={styles.inlineInput}
               />
-              <Input
-                label="Date"
-                value={expenseDate}
-                onChangeText={setExpenseDate}
-                placeholder={trip.startDate}
-                containerStyle={styles.inlineInput}
-              />
+              <View style={[styles.fieldGroup, styles.inlineInput]}>
+                <Text variant="label">Date</Text>
+                <Pressable
+                  style={styles.pickerField}
+                  onPress={() => setShowDatePicker("expenseDate")}
+                >
+                  <Ionicons
+                    name="calendar-outline"
+                    size={18}
+                    color={colors.text.tertiary}
+                  />
+                  <Text
+                    variant="body"
+                    style={expenseDate ? styles.pickerFieldText : styles.pickerFieldPlaceholder}
+                  >
+                    {formatDateFieldValue(expenseDate) || "Select expense date"}
+                  </Text>
+                </Pressable>
+              </View>
             </View>
             <Input
               label="Note"
@@ -1081,20 +1179,51 @@ export default function TripDetailScreen() {
               placeholder="Flight to Barcelona"
             />
             <View style={styles.inlineInputs}>
-              <Input
-                label="Date"
-                value={itineraryDate}
-                onChangeText={setItineraryDate}
-                placeholder={trip.startDate}
-                containerStyle={styles.inlineInput}
-              />
-              <Input
-                label="Location"
-                value={itineraryLocation}
-                onChangeText={setItineraryLocation}
-                placeholder="Terminal 1"
-                containerStyle={styles.inlineInput}
-              />
+              <View style={[styles.fieldGroup, styles.inlineInput]}>
+                <Text variant="label">Date</Text>
+                <Pressable
+                  style={styles.pickerField}
+                  onPress={() => setShowDatePicker("itineraryDate")}
+                >
+                  <Ionicons
+                    name="calendar-outline"
+                    size={18}
+                    color={colors.text.tertiary}
+                  />
+                  <Text
+                    variant="body"
+                    style={
+                      itineraryDate ? styles.pickerFieldText : styles.pickerFieldPlaceholder
+                    }
+                  >
+                    {formatDateFieldValue(itineraryDate) || "Select itinerary date"}
+                  </Text>
+                </Pressable>
+              </View>
+              <View style={[styles.fieldGroup, styles.inlineInput]}>
+                <Text variant="label">Location</Text>
+                <Pressable
+                  style={styles.pickerField}
+                  onPress={() => setShowLocationPicker("itineraryLocation")}
+                >
+                  <Ionicons
+                    name="navigate-outline"
+                    size={18}
+                    color={colors.text.tertiary}
+                  />
+                  <Text
+                    variant="body"
+                    style={
+                      itineraryLocation
+                        ? styles.pickerFieldText
+                        : styles.pickerFieldPlaceholder
+                    }
+                    numberOfLines={1}
+                  >
+                    {itineraryLocation || "Choose place or address"}
+                  </Text>
+                </Pressable>
+              </View>
             </View>
             <Input
               label="Note"
@@ -1187,6 +1316,89 @@ export default function TripDetailScreen() {
           </Card>
         </>
       ) : null}
+
+      <DatePickerSheet
+        visible={showDatePicker !== null}
+        title={
+          showDatePicker === "startDate"
+            ? "Trip start date"
+            : showDatePicker === "endDate"
+              ? "Trip end date"
+              : showDatePicker === "itineraryDate"
+                ? "Itinerary date"
+                : "Expense date"
+        }
+        value={
+          showDatePicker === "startDate"
+            ? startDate
+            : showDatePicker === "endDate"
+              ? endDate
+              : showDatePicker === "itineraryDate"
+                ? itineraryDate
+                : expenseDate
+        }
+        minimumDate={
+          showDatePicker === "endDate"
+            ? startDate || undefined
+            : showDatePicker === "itineraryDate" || showDatePicker === "expenseDate"
+              ? startDate || trip?.startDate || undefined
+              : undefined
+        }
+        maximumDate={
+          showDatePicker === "startDate"
+            ? endDate || undefined
+            : showDatePicker === "itineraryDate" || showDatePicker === "expenseDate"
+              ? endDate || trip?.endDate || undefined
+              : undefined
+        }
+        onClose={() => setShowDatePicker(null)}
+        onConfirm={(nextValue) => {
+          if (showDatePicker === "startDate") {
+            setStartDate(nextValue);
+            if (endDate && nextValue > endDate) {
+              setEndDate(nextValue);
+            }
+            return;
+          }
+
+          if (showDatePicker === "endDate") {
+            setEndDate(nextValue);
+            return;
+          }
+
+          if (showDatePicker === "itineraryDate") {
+            setItineraryDate(nextValue);
+            return;
+          }
+
+          setExpenseDate(nextValue);
+        }}
+      />
+
+      <LocationPickerSheet
+        visible={showLocationPicker !== null}
+        title={
+          showLocationPicker === "destination"
+            ? "Search destination"
+            : "Search itinerary location"
+        }
+        scope="trip"
+        accessToken={tokens?.accessToken}
+        initialValue={
+          showLocationPicker === "destination" ? destination : itineraryLocation
+        }
+        onClose={() => setShowLocationPicker(null)}
+        onSelect={(suggestion) => {
+          if (showLocationPicker) {
+            applyLocationSelection(showLocationPicker, suggestion);
+          }
+        }}
+        onSubmitText={(value) => {
+          if (showLocationPicker) {
+            applyTypedLocation(showLocationPicker, value);
+          }
+        }}
+      />
     </BlurScrollScreen>
   );
 }
@@ -1243,6 +1455,33 @@ const styles = StyleSheet.create({
   },
   inlineInput: {
     flex: 1,
+  },
+  fieldGroup: {
+    gap: spacing[2],
+  },
+  pickerField: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing[3],
+    minHeight: 52,
+    borderWidth: 1,
+    borderColor: colors.border.default,
+    borderRadius: borderRadius.xl,
+    backgroundColor: colors.background.primary,
+    paddingHorizontal: spacing[4],
+    paddingVertical: spacing[3],
+  },
+  pickerFieldText: {
+    flex: 1,
+    fontFamily: typography.fontFamily.regular,
+    fontSize: typography.fontSize.base,
+    color: colors.text.primary,
+  },
+  pickerFieldPlaceholder: {
+    flex: 1,
+    fontFamily: typography.fontFamily.regular,
+    fontSize: typography.fontSize.base,
+    color: colors.text.tertiary,
   },
   actionRow: {
     flexDirection: "row",

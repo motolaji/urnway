@@ -8,6 +8,37 @@ import {
   updateBoardingPassByBookingIdForUser,
   updateBookingRecordByIdForUser,
 } from './bookings.repository.js';
+import {
+  createTripItineraryItemRecord,
+  findTripByIdForUser,
+} from '../trips/trips.repository.js';
+import {
+  canResolveDuffelSearch,
+  createDuffelHoldOrder,
+  isDuffelConfigured,
+  searchDuffelFlightOffers,
+} from './duffel.service.js';
+import {
+  canResolveDuffelHotelSearch,
+  createDuffelStayBooking,
+  isDuffelStaysConfigured,
+  searchDuffelHotelOffers,
+} from './duffel-stays.service.js';
+import {
+  canResolveLiteApiHotelSearch,
+  cancelLiteApiBooking,
+  createLiteApiHotelBooking,
+  isLiteApiConfigured,
+  searchLiteApiHotelOffers,
+} from './liteapi.service.js';
+import type {
+  CreateFlightBookingInput,
+  CreateHotelBookingInput,
+  FlightOffer,
+  HotelOffer,
+  SearchFlightsInput,
+  SearchHotelsInput,
+} from './bookings.types.js';
 
 type AuthenticatedUser = {
   id: string;
@@ -15,72 +46,7 @@ type AuthenticatedUser = {
   sessionId: string;
 };
 
-type SearchFlightsInput = {
-  origin: string;
-  destination: string;
-  departDate: string;
-  returnDate?: string;
-  travelerCount?: number;
-  cabinClass?: 'economy' | 'premium' | 'business';
-};
-
-type SearchHotelsInput = {
-  city: string;
-  checkInDate: string;
-  checkOutDate: string;
-  roomCount?: number;
-  roomTier?: 'standard' | 'deluxe' | 'suite';
-};
-
-type FlightOffer = {
-  offerId: string;
-  originLabel: string;
-  originCode: string;
-  destinationLabel: string;
-  destinationCode: string;
-  departDate: string;
-  returnDate?: string;
-  carrierCode: string;
-  carrierName: string;
-  flightNumber: string;
-  duration: string;
-  cabinClass: 'economy' | 'premium' | 'business';
-  travelerCount: number;
-  totalAmount: string;
-  currency: string;
-};
-
-type CreateFlightBookingInput = {
-  offer: FlightOffer;
-  passengerName: string;
-  tripId?: string;
-  note?: string;
-};
-
-type HotelOffer = {
-  offerId: string;
-  cityLabel: string;
-  cityCode: string;
-  hotelName: string;
-  hotelCode: string;
-  providerCode: string;
-  providerName: string;
-  checkInDate: string;
-  checkOutDate: string;
-  roomTier: 'standard' | 'deluxe' | 'suite';
-  roomCount: number;
-  nightlyAmount: string;
-  totalAmount: string;
-  totalNights: number;
-  currency: string;
-};
-
-type CreateHotelBookingInput = {
-  offer: HotelOffer;
-  guestName: string;
-  tripId?: string;
-  note?: string;
-};
+type TripRecord = NonNullable<Awaited<ReturnType<typeof findTripByIdForUser>>>;
 
 const carriers = [
   { code: 'MZ', name: 'Mezo Air' },
@@ -135,6 +101,10 @@ function formatIsoDate(date: Date) {
   return date.toISOString();
 }
 
+function normalizeTripDate(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
+
 function calculateNightCount(checkInDate: string, checkOutDate: string) {
   const checkIn = new Date(`${checkInDate}T00:00:00.000Z`);
   const checkOut = new Date(`${checkOutDate}T00:00:00.000Z`);
@@ -142,6 +112,89 @@ function calculateNightCount(checkInDate: string, checkOutDate: string) {
     1,
     Math.round((checkOut.getTime() - checkIn.getTime()) / (1000 * 60 * 60 * 24))
   );
+}
+
+function assertTripContainsDate(trip: TripRecord, date: string, fieldName: string) {
+  const tripStart = normalizeTripDate(trip.startDate);
+  const tripEnd = normalizeTripDate(trip.endDate);
+
+  if (date < tripStart || date > tripEnd) {
+    throw new HttpError(
+      400,
+      `${fieldName} must fall within the linked trip window (${tripStart} to ${tripEnd})`
+    );
+  }
+}
+
+async function resolveLinkedTripForBooking(
+  user: AuthenticatedUser,
+  tripId: string | undefined,
+  startDate: string,
+  endDate?: string | null
+) {
+  if (!tripId) {
+    return null;
+  }
+
+  const trip = await findTripByIdForUser(user.id, tripId);
+
+  if (!trip) {
+    throw new HttpError(404, 'Trip not found');
+  }
+
+  assertTripContainsDate(trip, startDate, 'Booking start date');
+
+  if (endDate) {
+    assertTripContainsDate(trip, endDate, 'Booking end date');
+  }
+
+  return trip;
+}
+
+async function attachBookingToTripItinerary(
+  user: AuthenticatedUser,
+  trip: TripRecord | null,
+  booking: NonNullable<Awaited<ReturnType<typeof findBookingByIdForUser>>>
+) {
+  if (!trip) {
+    return;
+  }
+
+  if (booking.mode === 'hotel') {
+    await createTripItineraryItemRecord({
+      tripId: trip.id,
+      userId: user.id,
+      type: 'hotel',
+      title: booking.destinationLabel,
+      date: booking.departDate,
+      location: booking.originLabel,
+      note: [
+        `${booking.carrierName} booking`,
+        booking.returnDate ? `Checkout ${booking.returnDate}` : null,
+        `Ref ${booking.bookingReference}`,
+      ]
+        .filter(Boolean)
+        .join(' · '),
+    });
+
+    return;
+  }
+
+  await createTripItineraryItemRecord({
+    tripId: trip.id,
+    userId: user.id,
+    type: 'flight',
+    title: `${booking.originCode} to ${booking.destinationCode}`,
+    date: booking.departDate,
+    location: booking.destinationLabel,
+    note: [
+      `${booking.carrierName} ${booking.flightNumber}`,
+      booking.returnDate ? `Return ${booking.returnDate}` : null,
+      `Ref ${booking.bookingReference}`,
+    ]
+      .filter(Boolean)
+      .join(' · '),
+  });
 }
 
 function serializeFlightOffer(offer: FlightOffer) {
@@ -284,6 +337,12 @@ async function serializeBooking(
   return {
     id: booking.id,
     tripId: booking.tripId,
+    provider: {
+      code: booking.provider as 'demo' | 'duffel' | 'liteapi',
+      offerId: booking.providerOfferId,
+      orderId: booking.providerOrderId,
+      holdExpiresAt: booking.holdExpiresAt?.toISOString() ?? null,
+    },
     mode: booking.mode,
     status: booking.status,
     passengerName: booking.passengerName,
@@ -341,7 +400,10 @@ async function serializeBooking(
         isFlight && booking.status === 'confirmed' && (!boardingPass || boardingPass.status !== 'issued'),
     },
     cancellation: {
-      canCancel: booking.status === 'confirmed' || booking.status === 'ticketed',
+      canCancel:
+        booking.status === 'confirmed' ||
+        booking.status === 'ticketed' ||
+        (booking.status === 'held' && booking.provider !== 'duffel'),
       cancelledAt: booking.cancelRequestedAt?.toISOString() ?? null,
       policy: booking.cancellationPolicy,
     },
@@ -352,6 +414,10 @@ async function serializeBooking(
 }
 
 export async function searchFlightOffers(input: SearchFlightsInput) {
+  if (isDuffelConfigured() && canResolveDuffelSearch(input)) {
+    return searchDuffelFlightOffers(input);
+  }
+
   const originLabel = normalizeLabel(input.origin);
   const destinationLabel = normalizeLabel(input.destination);
   const originCode = toTravelCode(originLabel);
@@ -373,6 +439,11 @@ export async function searchFlightOffers(input: SearchFlightsInput) {
 
     return serializeFlightOffer({
       offerId: `flt_${hashString(`${seed}:${index}`).toString(36)}`,
+      provider: 'demo',
+      providerOfferId: null,
+      providerOfferRequestId: null,
+      expiresAt: null,
+      requiresInstantPayment: false,
       originLabel,
       originCode,
       destinationLabel,
@@ -404,6 +475,25 @@ export async function searchFlightOffers(input: SearchFlightsInput) {
 }
 
 export async function searchHotelOffers(input: SearchHotelsInput) {
+  if (isLiteApiConfigured() && canResolveLiteApiHotelSearch(input)) {
+    return searchLiteApiHotelOffers(input);
+  }
+
+  if (isDuffelStaysConfigured() && canResolveDuffelHotelSearch(input)) {
+    try {
+      return await searchDuffelHotelOffers(input);
+    } catch (error) {
+      if (
+        error instanceof HttpError &&
+        (error.statusCode === 401 || error.statusCode === 403 || error.statusCode === 404)
+      ) {
+        // fall through to demo fallback when Stays access is not enabled
+      } else {
+        throw error;
+      }
+    }
+  }
+
   const cityLabel = normalizeLabel(input.city);
   const cityCode = toTravelCode(cityLabel);
   const roomCount = input.roomCount ?? 1;
@@ -424,6 +514,12 @@ export async function searchHotelOffers(input: SearchHotelsInput) {
 
     return serializeHotelOffer({
       offerId: `htl_${hashString(`${seed}:${index}`).toString(36)}`,
+      provider: 'demo',
+      providerSearchResultId: null,
+      providerRateId: null,
+      providerAccommodationId: null,
+      expiresAt: null,
+      paymentType: 'pay_later',
       cityLabel,
       cityCode,
       hotelName: `${hotel.name} ${cityLabel}`,
@@ -467,7 +563,7 @@ export async function listUserBookings(user: AuthenticatedUser) {
       bookingCount: serializedBookings.length,
       ticketedCount: serializedBookings.filter((booking) => booking.ticket.issued).length,
       confirmedCount: serializedBookings.filter((booking) => booking.status === 'confirmed').length,
-      currency: 'MUSD',
+      currency: serializedBookings[0]?.payment.currency ?? 'MUSD',
     },
     nextBoardingPassBooking: nextIssuedBooking,
     bookings: serializedBookings,
@@ -478,15 +574,63 @@ export async function createFlightBooking(
   user: AuthenticatedUser,
   input: CreateFlightBookingInput
 ) {
-  const bookingReference = createBookingReference(
-    `${user.id}:${input.offer.offerId}:${input.passengerName}:${Date.now()}`
+  const linkedTrip = await resolveLinkedTripForBooking(
+    user,
+    input.tripId,
+    input.offer.departDate,
+    input.offer.returnDate ?? null
   );
+
+  const trimmedPassengerName = input.passengerName.trim();
+  const trimmedEmail = input.email?.trim();
+  const trimmedPhoneNumber = input.phoneNumber?.trim();
+
+  let bookingReference = createBookingReference(
+    `${user.id}:${input.offer.offerId}:${trimmedPassengerName}:${Date.now()}`
+  );
+  let bookingStatus = 'confirmed';
+  let providerOrderId: string | null = null;
+  let holdExpiresAt: Date | null = null;
+  let totalAmount = input.offer.totalAmount;
+  let currency = input.offer.currency;
+  let cancellationPolicy = 'Flexible refund policy';
+
+  if (input.offer.provider === 'duffel') {
+    if (!input.bornOn || !trimmedEmail || !trimmedPhoneNumber || !input.title || !input.gender) {
+      throw new HttpError(
+        400,
+        'Duffel flight bookings require passenger date of birth, email, phone number, title, and gender'
+      );
+    }
+
+    const order = await createDuffelHoldOrder(input.offer, {
+      passengerName: trimmedPassengerName,
+      bornOn: input.bornOn,
+      email: trimmedEmail,
+      phoneNumber: trimmedPhoneNumber,
+      title: input.title,
+      gender: input.gender,
+    });
+
+    bookingReference = order.bookingReference ?? bookingReference;
+    providerOrderId = order.orderId;
+    holdExpiresAt = order.holdExpiresAt ? new Date(order.holdExpiresAt) : null;
+    totalAmount = order.totalAmount;
+    currency = order.currency;
+    bookingStatus = 'held';
+    cancellationPolicy =
+      'Held with Duffel. Provider payment still needs to be completed before ticketing is available.';
+  }
 
   const booking = await createBookingRecord({
     userId: user.id,
-    tripId: input.tripId ?? null,
+    tripId: linkedTrip?.id ?? null,
+    provider: input.offer.provider,
+    providerOfferId: input.offer.providerOfferId,
+    providerOrderId,
+    holdExpiresAt,
     mode: 'flight',
-    status: 'confirmed',
+    status: bookingStatus,
     originLabel: input.offer.originLabel,
     originCode: input.offer.originCode,
     destinationLabel: input.offer.destinationLabel,
@@ -499,12 +643,15 @@ export async function createFlightBooking(
     duration: input.offer.duration,
     cabinClass: input.offer.cabinClass,
     travelerCount: input.offer.travelerCount,
-    passengerName: input.passengerName.trim(),
-    totalAmount: input.offer.totalAmount,
-    currency: input.offer.currency,
+    passengerName: trimmedPassengerName,
+    totalAmount,
+    currency,
     bookingReference,
     note: input.note?.trim() || null,
+    cancellationPolicy,
   });
+
+  await attachBookingToTripItinerary(user, linkedTrip, booking);
 
   return {
     booking: await serializeBooking(user, booking),
@@ -515,15 +662,78 @@ export async function createHotelBooking(
   user: AuthenticatedUser,
   input: CreateHotelBookingInput
 ) {
+  const linkedTrip = await resolveLinkedTripForBooking(
+    user,
+    input.tripId,
+    input.offer.checkInDate,
+    input.offer.checkOutDate
+  );
   const bookingReference = createBookingReference(
     `${user.id}:${input.offer.offerId}:${input.guestName}:${Date.now()}`
   );
+  const trimmedGuestName = input.guestName.trim();
+  const trimmedEmail = input.email?.trim();
+  const trimmedPhoneNumber = input.phoneNumber?.trim();
+
+  let providerOrderId: string | null = null;
+  let bookingStatus = 'confirmed';
+  let totalAmount = input.offer.totalAmount;
+  let currency = input.offer.currency;
+  let resolvedBookingReference = bookingReference;
+  let cancellationPolicy = 'Flexible refund policy';
+
+  if (input.offer.provider === 'liteapi') {
+    if (!trimmedEmail) {
+      throw new HttpError(400, 'LiteAPI hotel bookings require the lead guest email');
+    }
+
+    const stayBooking = await createLiteApiHotelBooking(input.offer, {
+      guestName: trimmedGuestName,
+      email: trimmedEmail,
+      note: input.note?.trim() || undefined,
+      clientReference: bookingReference,
+    });
+
+    providerOrderId = stayBooking.bookingId;
+    bookingStatus = stayBooking.status;
+    totalAmount = stayBooking.totalAmount;
+    currency = stayBooking.currency;
+    resolvedBookingReference = stayBooking.bookingReference ?? bookingReference;
+    cancellationPolicy =
+      'Booked with liteAPI. Cancellation and refund outcomes depend on the selected rate policy.';
+  } else if (input.offer.provider === 'duffel') {
+    if (!input.bornOn || !trimmedEmail || !trimmedPhoneNumber) {
+      throw new HttpError(
+        400,
+        'Duffel hotel bookings require guest date of birth, email, and phone number'
+      );
+    }
+
+    const stayBooking = await createDuffelStayBooking(input.offer, {
+      guestName: trimmedGuestName,
+      bornOn: input.bornOn,
+      email: trimmedEmail,
+      phoneNumber: trimmedPhoneNumber,
+      note: input.note?.trim() || undefined,
+    });
+
+    providerOrderId = stayBooking.bookingId;
+    bookingStatus = stayBooking.status;
+    totalAmount = stayBooking.totalAmount;
+    currency = stayBooking.currency;
+    resolvedBookingReference = stayBooking.bookingReference ?? bookingReference;
+    cancellationPolicy =
+      'Booked with Duffel Stays. Cancellation eligibility depends on the accommodation policy and provider status.';
+  }
 
   const booking = await createBookingRecord({
     userId: user.id,
-    tripId: input.tripId ?? null,
+    tripId: linkedTrip?.id ?? null,
+    provider: input.offer.provider,
+    providerOfferId: input.offer.providerRateId,
+    providerOrderId,
     mode: 'hotel',
-    status: 'confirmed',
+    status: bookingStatus,
     originLabel: input.offer.cityLabel,
     originCode: input.offer.cityCode,
     destinationLabel: input.offer.hotelName,
@@ -536,12 +746,15 @@ export async function createHotelBooking(
     duration: input.offer.nightlyAmount,
     cabinClass: input.offer.roomTier,
     travelerCount: input.offer.roomCount,
-    passengerName: input.guestName.trim(),
-    totalAmount: input.offer.totalAmount,
-    currency: input.offer.currency,
-    bookingReference,
+    passengerName: trimmedGuestName,
+    totalAmount,
+    currency,
+    bookingReference: resolvedBookingReference,
     note: input.note?.trim() || null,
+    cancellationPolicy,
   });
+
+  await attachBookingToTripItinerary(user, linkedTrip, booking);
 
   return {
     booking: await serializeBooking(user, booking),
@@ -645,12 +858,30 @@ export async function cancelBooking(user: AuthenticatedUser, id: string) {
   const refundPreview = calculateRefundPreview(booking);
   const now = new Date();
 
+  let resolvedRefundStatus = refundPreview.status;
+  let resolvedRefundAmount = refundPreview.amount;
+
+  if (booking.provider === 'liteapi' && booking.providerOrderId) {
+    const providerCancellation = await cancelLiteApiBooking(booking.providerOrderId);
+    const providerStatus = providerCancellation.status.toUpperCase();
+
+    if (providerCancellation.refundAmount) {
+      resolvedRefundAmount = providerCancellation.refundAmount;
+    }
+
+    if (providerStatus.includes('WITH_CHARGES')) {
+      resolvedRefundStatus = resolvedRefundAmount === '0' ? 'not_eligible' : 'pending';
+    } else if (providerStatus.includes('CANCELLED')) {
+      resolvedRefundStatus = resolvedRefundAmount === '0' ? 'not_eligible' : 'pending';
+    }
+  }
+
   const updatedBooking = await updateBookingRecordByIdForUser(user.id, id, {
     status: 'cancelled',
-    refundStatus: refundPreview.status,
-    refundAmount: refundPreview.amount,
+    refundStatus: resolvedRefundStatus,
+    refundAmount: resolvedRefundAmount,
     cancelRequestedAt: now,
-    refundedAt: refundPreview.status === 'not_eligible' ? null : null,
+    refundedAt: null,
   });
 
   if (!updatedBooking) {

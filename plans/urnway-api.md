@@ -11,6 +11,7 @@
 - [x] Base modules exist for health, auth, wallet, payments, and webhooks
 - [x] API currently builds successfully
 - [x] Current code now exposes auth, wallet, direct-send, payment-link, QR, vault, trip, booking, boarding-pass, and webhook routes
+- [x] Current code now exposes a protected places autocomplete route for flight, stay, and trip destination suggestions
 - [x] Current schema now includes auth/session tables plus payment links, payment link attempts, travel goals, trips, bookings, and boarding passes
 - [x] Canonical `/v1` API contract exists
 - [x] MVP borrow strategy is clarified: use Mezo UI instead of rebuilding protocol internals
@@ -150,13 +151,17 @@ Purpose: manage travel savings goals in Urnway and hand users off to Mezo Save/E
 
 Purpose: manage trips, shared pools, bookings, expenses, and boarding passes.
 
+- [x] Implement `GET /places/autocomplete` for airport, stay, and trip suggestion search
 - [x] Implement trip routes for list, create, detail, and update
 - [x] Implement trip itinerary create and update routes
 - [x] Implement trip expense create and update routes with spend breakdown in trip detail
 - [ ] Implement trip cancel routes
 - [ ] Implement group routes for create, detail, invite, join, member removal, contributions, expense list, expense create, expense edit, balances, and settlement
 - [x] Implement booking routes for flight search, flight book, detail, and ticket issuance
+- [x] Add Duffel-backed flight search and hold-order booking with demo fallback
 - [x] Implement hotel search and hotel book routes
+- [x] Scaffold hotel search and booking integration for real provider inventory, now preferring liteAPI with demo fallback
+- [x] Auto-attach linked bookings into trip itinerary items
 - [x] Implement booking cancel plus refund-state tracking
 - [ ] Implement provider-backed refund settlement and per-booking multi-pass flows
 - [x] Implement boarding-pass routes for list, next, and detail
@@ -176,8 +181,8 @@ Purpose: manage trips, shared pools, bookings, expenses, and boarding passes.
 ### Product integrations
 
 - [ ] Add Goldsky integration for transaction history and chain event ingestion
-- [ ] Add Duffel integration for flights
-- [ ] Add Booking.com integration for hotels
+- [x] Add Duffel integration for flights
+- [ ] Validate live liteAPI hotel inventory and booking with a working API key and production-safe payment flow
 - [ ] Add Expo push token support
 - [ ] Add Telegram bot/webhook support
 - [ ] Add storage integration for passes and documents

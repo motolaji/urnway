@@ -32,6 +32,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@urnway/contracts": "*",
     "@urnway/tsconfig": "*",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",

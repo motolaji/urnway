@@ -5,14 +5,11 @@ import dynamic from 'next/dynamic';
 const AuthScreen = dynamic(() => import('./auth-screen'), {
   ssr: false,
   loading: () => (
-    <main className="shell">
-      <section className="hero">
-        <p className="eyebrow">Urnway Auth Bridge</p>
-        <h1>Preparing Passport auth...</h1>
-        <p className="lede">
-          Loading the client-only wallet bridge so Passport can connect, sign, and hand the
-          payload back to mobile.
-        </p>
+    <main className="bridge-shell">
+      <section className="bridge-card">
+        <p className="bridge-kicker">Urnway x Mezo Passport</p>
+        <h1 className="bridge-title">Preparing sign-in</h1>
+        <p className="bridge-copy">Loading Passport.</p>
       </section>
     </main>
   ),

@@ -121,11 +121,7 @@ export function buildAuthDeepLink(
 export function postAuthBridgeEnvelopeToReactNativeWebView(
   envelope: AuthBridgeEnvelope
 ) {
-  if (typeof window === "undefined") {
-    return false;
-  }
-
-  const bridge = (window as typeof window & {
+  const bridge = (globalThis as typeof globalThis & {
     ReactNativeWebView?: {
       postMessage(message: string): void;
     };

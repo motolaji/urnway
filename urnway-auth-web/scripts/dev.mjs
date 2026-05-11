@@ -54,7 +54,10 @@ const child = spawn(
   ["next", "dev", "--hostname", host],
   {
     stdio: "inherit",
-    env: process.env,
+    env: {
+      ...process.env,
+      NEXT_IGNORE_INCORRECT_LOCKFILE: "1",
+    },
   }
 );
 

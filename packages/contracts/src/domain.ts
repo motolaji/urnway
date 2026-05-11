@@ -177,9 +177,27 @@ export type GeneratedTripItineraryDraft = {
   items: TripItineraryDraft[];
 };
 
+export type LocationSuggestionScope = "flight" | "stay" | "trip";
+
+export type LocationSuggestion = {
+  id: string;
+  placeId: string | null;
+  label: string;
+  primaryText: string;
+  secondaryText: string | null;
+  searchValue: string;
+  source: "local" | "google" | "liteapi";
+};
+
 export type FlightBookingOffer = {
   mode: "flight";
   offerId: string;
+  provider: "demo" | "duffel";
+  providerOfferId: string | null;
+  providerOfferRequestId: string | null;
+  providerPassengerIds?: string[];
+  expiresAt: string | null;
+  requiresInstantPayment: boolean;
   originLabel: string;
   originCode: string;
   destinationLabel: string;
@@ -199,6 +217,12 @@ export type FlightBookingOffer = {
 export type HotelBookingOffer = {
   mode: "hotel";
   offerId: string;
+  provider: "demo" | "duffel" | "liteapi";
+  providerSearchResultId?: string | null;
+  providerRateId?: string | null;
+  providerAccommodationId?: string | null;
+  expiresAt?: string | null;
+  paymentType?: string;
   cityLabel: string;
   cityCode: string;
   hotelName: string;
@@ -218,6 +242,12 @@ export type HotelBookingOffer = {
 export type Booking = {
   id: string;
   tripId: string | null;
+  provider: {
+    code: "demo" | "duffel" | "liteapi";
+    offerId: string | null;
+    orderId: string | null;
+    holdExpiresAt: string | null;
+  };
   mode: "flight" | "hotel";
   status: string;
   passengerName: string;

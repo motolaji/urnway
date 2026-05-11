@@ -1,9 +1,11 @@
 import { Ionicons } from "@expo/vector-icons";
+import { DateTimePickerAndroid } from "@react-native-community/datetimepicker";
 import { type Href, useRouter } from "expo-router";
 import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -11,6 +13,8 @@ import {
   View,
 } from "react-native";
 
+import DatePickerSheet from "@/components/date-picker-sheet";
+import LocationPickerSheet from "@/components/location-picker-sheet";
 import { Badge, Button, IconButton, Text } from "@/components/ui";
 import { borderRadius, colors, spacing, typography } from "@/constants/design-tokens";
 import {
@@ -19,12 +23,15 @@ import {
   createHotelBooking,
   fetchBookings,
   fetchNextBoardingPass,
+  type LocationSuggestion,
+  fetchTrips,
   searchFlightBookingOffers,
   searchHotelBookingOffers,
   type BoardingPass,
   type Booking,
   type FlightBookingOffer,
   type HotelBookingOffer,
+  type Trip,
 } from "@/lib/session";
 import { useSession } from "@/providers/session-provider";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -67,6 +74,42 @@ function formatSingleDate(date: string) {
   });
 }
 
+function formatDateFieldValue(date: string) {
+  if (!date.trim()) {
+    return "";
+  }
+
+  return new Date(`${date}T12:00:00Z`).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function formatFullDateFieldValue(date: string) {
+  if (!date.trim()) {
+    return "";
+  }
+
+  return new Date(`${date}T12:00:00Z`).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+function parseIsoDateField(value?: string | null) {
+  if (!value) {
+    return new Date();
+  }
+
+  const parsed = new Date(`${value}T12:00:00Z`);
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+}
+
+function toIsoDateFieldValue(value: Date) {
+  return value.toISOString().slice(0, 10);
+}
+
 function getBookingTitle(booking: Booking) {
   if (booking.mode === "hotel" && booking.stay) {
     return booking.stay.hotel.label;
@@ -88,6 +131,91 @@ function getBookingSubtitle(booking: Booking) {
     : booking.bookingReference;
 }
 
+function isDuffelFlightOffer(
+  offer: FlightBookingOffer | HotelBookingOffer | null
+): offer is FlightBookingOffer {
+  return Boolean(offer && "originCode" in offer && offer.provider === "duffel");
+}
+
+function isDuffelHotelOffer(
+  offer: FlightBookingOffer | HotelBookingOffer | null
+): offer is HotelBookingOffer {
+  return Boolean(offer && "cityCode" in offer && offer.provider === "duffel");
+}
+
+function isLiteApiHotelOffer(
+  offer: FlightBookingOffer | HotelBookingOffer | null
+): offer is HotelBookingOffer {
+  return Boolean(offer && "cityCode" in offer && offer.provider === "liteapi");
+}
+
+function getFlightOfferBookingModeLabel(offer: FlightBookingOffer) {
+  if (offer.provider !== "duffel") {
+    return "Demo booking";
+  }
+
+  return offer.requiresInstantPayment
+    ? "Instant provider payment required"
+    : "Hold available";
+}
+
+function getHotelOfferBookingModeLabel(offer: HotelBookingOffer) {
+  if (offer.provider === "liteapi") {
+    return "Provider-backed stay";
+  }
+
+  if (offer.provider !== "duffel") {
+    return "Demo stay booking";
+  }
+
+  return offer.paymentType === "pay_now"
+    ? "Instant payment rate"
+    : "Provider-backed stay";
+}
+
+function isIsoDateString(value: string) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value.trim());
+}
+
+function isValidEmailAddress(value: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+}
+
+function isPlausiblePhoneNumber(value: string) {
+  const normalized = value.replace(/[^\d+]/g, "");
+  return normalized.length >= 6;
+}
+
+function getValidationMessageFromApiError(error: ApiError, fallback: string) {
+  const details = error.details as
+    | {
+        formErrors?: string[];
+        fieldErrors?: Record<string, string[] | undefined>;
+      }
+    | null
+    | undefined;
+
+  if (!details) {
+    return error.message || fallback;
+  }
+
+  const formError = details.formErrors?.find(Boolean);
+  if (formError) {
+    return formError;
+  }
+
+  const fieldEntry = Object.entries(details.fieldErrors ?? {}).find(
+    ([, messages]) => Array.isArray(messages) && messages.length > 0 && messages[0]
+  );
+
+  if (fieldEntry) {
+    const [field, messages] = fieldEntry;
+    return `${field}: ${messages?.[0]}`;
+  }
+
+  return error.message || fallback;
+}
+
 export default function TripsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -99,16 +227,20 @@ export default function TripsScreen() {
     bookings: [],
   });
   const [nextBoardingPass, setNextBoardingPass] = useState<BoardingPass | null>(null);
+  const [availableTrips, setAvailableTrips] = useState<Trip[]>([]);
 
   // Flight form
   const [origin, setOrigin] = useState("");
+  const [originSearchValue, setOriginSearchValue] = useState<string | null>(null);
   const [destination, setDestination] = useState("");
+  const [destinationSearchValue, setDestinationSearchValue] = useState<string | null>(null);
   const [departDate, setDepartDate] = useState("");
   const [returnDate, setReturnDate] = useState("");
   const [cabinClass, setCabinClass] = useState<"economy" | "premium" | "business">("economy");
 
   // Hotel form
   const [hotelCity, setHotelCity] = useState("");
+  const [hotelCitySearchValue, setHotelCitySearchValue] = useState<string | null>(null);
   const [checkIn, setCheckIn] = useState("");
   const [checkOut, setCheckOut] = useState("");
   const [rooms, setRooms] = useState("1");
@@ -122,8 +254,17 @@ export default function TripsScreen() {
   // Booking modal
   const [showBookingModal, setShowBookingModal] = useState(false);
   const [selectedOffer, setSelectedOffer] = useState<FlightBookingOffer | HotelBookingOffer | null>(null);
+  const [pendingBookingOffer, setPendingBookingOffer] = useState<
+    FlightBookingOffer | HotelBookingOffer | null
+  >(null);
   const [passengerName, setPassengerName] = useState("");
+  const [passengerBornOn, setPassengerBornOn] = useState("");
+  const [passengerEmail, setPassengerEmail] = useState("");
+  const [passengerPhoneNumber, setPassengerPhoneNumber] = useState("");
+  const [passengerTitle, setPassengerTitle] = useState<"mr" | "mrs" | "ms" | "miss" | "mx" | "dr">("mr");
+  const [passengerGender, setPassengerGender] = useState<"m" | "f" | "x">("m");
   const [bookingNote, setBookingNote] = useState("");
+  const [selectedTripId, setSelectedTripId] = useState<string | null>(null);
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -131,17 +272,24 @@ export default function TripsScreen() {
   const [isSearching, setIsSearching] = useState(false);
   const [bookingOfferId, setBookingOfferId] = useState<string | null>(null);
   const [showMenu, setShowMenu] = useState(false);
-  const [showDatePicker, setShowDatePicker] = useState<"depart" | "return" | "checkIn" | "checkOut" | null>(null);
+  const [showDatePicker, setShowDatePicker] = useState<
+    "depart" | "return" | "checkIn" | "checkOut" | "passengerBornOn" | null
+  >(null);
+  const [showLocationPicker, setShowLocationPicker] = useState<
+    "origin" | "destination" | "hotelCity" | null
+  >(null);
   const [showFilters, setShowFilters] = useState(false);
+  const todayIsoDate = new Date().toISOString().slice(0, 10);
 
   async function loadTravelData(accessToken: string) {
     setIsLoading(true);
     setErrorMessage(null);
 
     try {
-      const [bookingsData, nextPass] = await Promise.all([
+      const [bookingsData, nextPass, tripsData] = await Promise.all([
         fetchBookings(accessToken),
         fetchNextBoardingPass(accessToken),
+        fetchTrips(accessToken),
       ]);
 
       setBookingsState({
@@ -149,6 +297,7 @@ export default function TripsScreen() {
         bookings: bookingsData.bookings,
       });
       setNextBoardingPass(nextPass);
+      setAvailableTrips(tripsData.trips);
     } catch (error) {
       setErrorMessage(
         error instanceof ApiError
@@ -168,6 +317,133 @@ export default function TripsScreen() {
     void loadTravelData(tokens.accessToken);
   }, [tokens?.accessToken]);
 
+  useEffect(() => {
+    if (!pendingBookingOffer || showResultsModal) {
+      return;
+    }
+
+    setSelectedOffer(pendingBookingOffer);
+    setShowBookingModal(true);
+    setPendingBookingOffer(null);
+  }, [pendingBookingOffer, showResultsModal]);
+
+  function beginBookingFlow(offer: FlightBookingOffer | HotelBookingOffer) {
+    setPassengerName("");
+    setPassengerBornOn("");
+    setPassengerEmail("");
+    setPassengerPhoneNumber("");
+    setPassengerTitle("mr");
+    setPassengerGender("m");
+    setBookingNote("");
+    setSelectedTripId(null);
+    setPendingBookingOffer(offer);
+    setShowResultsModal(false);
+  }
+
+  function applyLocationSelection(field: "origin" | "destination" | "hotelCity", suggestion: LocationSuggestion) {
+    if (field === "origin") {
+      setOrigin(suggestion.label);
+      setOriginSearchValue(suggestion.searchValue);
+      return;
+    }
+
+    if (field === "destination") {
+      setDestination(suggestion.label);
+      setDestinationSearchValue(suggestion.searchValue);
+      return;
+    }
+
+    setHotelCity(suggestion.label);
+    setHotelCitySearchValue(suggestion.searchValue);
+  }
+
+  function applyTypedLocation(field: "origin" | "destination" | "hotelCity", value: string) {
+    if (field === "origin") {
+      setOrigin(value);
+      setOriginSearchValue(null);
+      return;
+    }
+
+    if (field === "destination") {
+      setDestination(value);
+      setDestinationSearchValue(null);
+      return;
+    }
+
+    setHotelCity(value);
+    setHotelCitySearchValue(null);
+  }
+
+  function openDatePicker(
+    target: "depart" | "return" | "checkIn" | "checkOut" | "passengerBornOn"
+  ) {
+    if (Platform.OS !== "android") {
+      setShowDatePicker(target);
+      return;
+    }
+
+    const currentValue =
+      target === "depart"
+        ? departDate
+        : target === "return"
+        ? returnDate
+        : target === "checkIn"
+        ? checkIn
+        : target === "checkOut"
+        ? checkOut
+        : passengerBornOn;
+
+    const minimumDate =
+      target === "return"
+        ? departDate || undefined
+        : target === "checkOut"
+        ? checkIn || undefined
+        : undefined;
+
+    DateTimePickerAndroid.open({
+      value: parseIsoDateField(currentValue),
+      mode: "date",
+      is24Hour: true,
+      minimumDate: minimumDate ? parseIsoDateField(minimumDate) : undefined,
+      maximumDate: target === "passengerBornOn" ? parseIsoDateField(todayIsoDate) : undefined,
+      onChange: (event, selectedDate) => {
+        if (event.type !== "set" || !selectedDate) {
+          return;
+        }
+
+        const nextValue = toIsoDateFieldValue(selectedDate);
+
+        if (target === "depart") {
+          setDepartDate(nextValue);
+          if (returnDate && returnDate < nextValue) {
+            setReturnDate("");
+          }
+          return;
+        }
+
+        if (target === "return") {
+          setReturnDate(nextValue);
+          return;
+        }
+
+        if (target === "checkIn") {
+          setCheckIn(nextValue);
+          if (checkOut && checkOut <= nextValue) {
+            setCheckOut("");
+          }
+          return;
+        }
+
+        if (target === "checkOut") {
+          setCheckOut(nextValue);
+          return;
+        }
+
+        setPassengerBornOn(nextValue);
+      },
+    });
+  }
+
   async function handleSearchFlights() {
     if (!tokens?.accessToken || isSearching) return;
 
@@ -183,8 +459,8 @@ export default function TripsScreen() {
     try {
       const result = await searchFlightBookingOffers(
         {
-          origin: origin.trim(),
-          destination: destination.trim(),
+          origin: (originSearchValue ?? origin).trim(),
+          destination: (destinationSearchValue ?? destination).trim(),
           departDate: departDate.trim(),
           returnDate: returnDate.trim() || undefined,
           cabinClass,
@@ -220,7 +496,7 @@ export default function TripsScreen() {
     try {
       const result = await searchHotelBookingOffers(
         {
-          city: hotelCity.trim(),
+          city: (hotelCitySearchValue ?? hotelCity).trim(),
           checkInDate: checkIn.trim(),
           checkOutDate: checkOut.trim(),
           roomCount: Number.parseInt(rooms, 10) || 1,
@@ -248,6 +524,48 @@ export default function TripsScreen() {
       return;
     }
 
+    if (passengerBornOn.trim() && !isIsoDateString(passengerBornOn)) {
+      setErrorMessage("Date of birth must use YYYY-MM-DD");
+      return;
+    }
+
+    if (passengerEmail.trim() && !isValidEmailAddress(passengerEmail)) {
+      setErrorMessage("Enter a valid email address");
+      return;
+    }
+
+    if (passengerPhoneNumber.trim() && !isPlausiblePhoneNumber(passengerPhoneNumber)) {
+      setErrorMessage("Phone number must be at least 6 characters");
+      return;
+    }
+
+    if (offer.provider === "duffel") {
+      if (!passengerBornOn.trim()) {
+        setErrorMessage("Date of birth is required for Duffel flight bookings");
+        return;
+      }
+
+      if (!passengerEmail.trim()) {
+        setErrorMessage("Email is required for Duffel flight bookings");
+        return;
+      }
+
+      if (!passengerPhoneNumber.trim()) {
+        setErrorMessage("Phone number is required for Duffel flight bookings");
+        return;
+      }
+
+      if (!isValidEmailAddress(passengerEmail)) {
+        setErrorMessage("Enter a valid email address for Duffel flight bookings");
+        return;
+      }
+
+      if (!isPlausiblePhoneNumber(passengerPhoneNumber)) {
+        setErrorMessage("Enter a valid phone number for Duffel flight bookings");
+        return;
+      }
+    }
+
     clearError();
     setBookingOfferId(offer.offerId);
 
@@ -256,6 +574,12 @@ export default function TripsScreen() {
         {
           offer,
           passengerName: passengerName.trim(),
+          bornOn: passengerBornOn.trim() || undefined,
+          email: passengerEmail.trim() || undefined,
+          phoneNumber: passengerPhoneNumber.trim() || undefined,
+          title: passengerTitle,
+          gender: passengerGender,
+          tripId: selectedTripId ?? undefined,
           note: bookingNote.trim() || undefined,
         },
         tokens.accessToken
@@ -276,11 +600,21 @@ export default function TripsScreen() {
 
       setShowBookingModal(false);
       setShowResultsModal(false);
-      setStatusMessage("Flight booked successfully!");
+      setSelectedTripId(null);
+      setStatusMessage(
+        offer.provider === "duffel"
+          ? "Flight hold created with Duffel."
+          : "Flight booked successfully!"
+      );
       router.push(`/bookings/${booking.id}` as Href);
     } catch (error) {
       setErrorMessage(
-        error instanceof ApiError ? error.message : "Unable to complete booking. Please try again."
+        error instanceof ApiError
+          ? getValidationMessageFromApiError(
+              error,
+              "Unable to complete booking. Please try again."
+            )
+          : "Unable to complete booking. Please try again."
       );
     } finally {
       setBookingOfferId(null);
@@ -293,6 +627,58 @@ export default function TripsScreen() {
       return;
     }
 
+    if (passengerBornOn.trim() && !isIsoDateString(passengerBornOn)) {
+      setErrorMessage("Date of birth must use YYYY-MM-DD");
+      return;
+    }
+
+    if (passengerEmail.trim() && !isValidEmailAddress(passengerEmail)) {
+      setErrorMessage("Enter a valid email address");
+      return;
+    }
+
+    if (passengerPhoneNumber.trim() && !isPlausiblePhoneNumber(passengerPhoneNumber)) {
+      setErrorMessage("Phone number must be at least 6 characters");
+      return;
+    }
+
+    if (offer.provider === "liteapi") {
+      if (!passengerEmail.trim()) {
+        setErrorMessage("Email is required for liteAPI hotel bookings");
+        return;
+      }
+
+      if (!isValidEmailAddress(passengerEmail)) {
+        setErrorMessage("Enter a valid email address for liteAPI hotel bookings");
+        return;
+      }
+    } else if (offer.provider === "duffel") {
+      if (!passengerBornOn.trim()) {
+        setErrorMessage("Date of birth is required for Duffel hotel bookings");
+        return;
+      }
+
+      if (!passengerEmail.trim()) {
+        setErrorMessage("Email is required for Duffel hotel bookings");
+        return;
+      }
+
+      if (!passengerPhoneNumber.trim()) {
+        setErrorMessage("Phone number is required for Duffel hotel bookings");
+        return;
+      }
+
+      if (!isValidEmailAddress(passengerEmail)) {
+        setErrorMessage("Enter a valid email address for Duffel hotel bookings");
+        return;
+      }
+
+      if (!isPlausiblePhoneNumber(passengerPhoneNumber)) {
+        setErrorMessage("Enter a valid phone number for Duffel hotel bookings");
+        return;
+      }
+    }
+
     clearError();
     setBookingOfferId(offer.offerId);
 
@@ -301,6 +687,10 @@ export default function TripsScreen() {
         {
           offer,
           guestName: passengerName.trim(),
+          bornOn: passengerBornOn.trim() || undefined,
+          email: passengerEmail.trim() || undefined,
+          phoneNumber: passengerPhoneNumber.trim() || undefined,
+          tripId: selectedTripId ?? undefined,
           note: bookingNote.trim() || undefined,
         },
         tokens.accessToken
@@ -321,11 +711,23 @@ export default function TripsScreen() {
 
       setShowBookingModal(false);
       setShowResultsModal(false);
-      setStatusMessage("Hotel booked successfully!");
+      setSelectedTripId(null);
+      setStatusMessage(
+        offer.provider === "liteapi"
+          ? "Hotel booked with liteAPI."
+          : offer.provider === "duffel"
+          ? "Hotel booked with Duffel Stays."
+          : "Hotel booked successfully!"
+      );
       router.push(`/bookings/${booking.id}` as Href);
     } catch (error) {
       setErrorMessage(
-        error instanceof ApiError ? error.message : "Unable to complete booking. Please try again."
+        error instanceof ApiError
+          ? getValidationMessageFromApiError(
+              error,
+              "Unable to complete booking. Please try again."
+            )
+          : "Unable to complete booking. Please try again."
       );
     } finally {
       setBookingOfferId(null);
@@ -417,56 +819,71 @@ export default function TripsScreen() {
         {activeTab === "flights" && (
           <View style={styles.searchForm}>
             <View style={styles.originDestRow}>
-              <View style={[styles.inputPill, styles.inputHalf]}>
+              <Pressable
+                style={[styles.inputPill, styles.inputHalf]}
+                onPress={() => setShowLocationPicker("origin")}
+              >
                 <Ionicons name="airplane-outline" size={20} color={colors.text.tertiary} />
-                <TextInput
-                  style={styles.pillInput}
-                  placeholder="Origin"
-                  placeholderTextColor={colors.text.tertiary}
-                  value={origin}
-                  onChangeText={setOrigin}
-                  autoCapitalize="words"
-                />
-              </View>
-              <Pressable style={styles.swapButton}>
+                <Text
+                  variant="body"
+                  style={origin ? styles.dateText : styles.datePlaceholder}
+                  numberOfLines={1}
+                >
+                  {origin || "Origin"}
+                </Text>
+              </Pressable>
+              <Pressable
+                style={styles.swapButton}
+                onPress={() => {
+                  setOrigin((currentOrigin) => {
+                    const nextOrigin = destination;
+                    setDestination(currentOrigin);
+                    return nextOrigin;
+                  });
+                  setOriginSearchValue(destinationSearchValue);
+                  setDestinationSearchValue(originSearchValue);
+                }}
+              >
                 <Ionicons name="swap-horizontal" size={24} color={colors.text.secondary} />
               </Pressable>
-              <View style={[styles.inputPill, styles.inputHalf]}>
+              <Pressable
+                style={[styles.inputPill, styles.inputHalf]}
+                onPress={() => setShowLocationPicker("destination")}
+              >
                 <Ionicons name="location-outline" size={20} color={colors.text.tertiary} />
-                <TextInput
-                  style={styles.pillInput}
-                  placeholder="Destination"
-                  placeholderTextColor={colors.text.tertiary}
-                  value={destination}
-                  onChangeText={setDestination}
-                  autoCapitalize="words"
-                />
-              </View>
+                <Text
+                  variant="body"
+                  style={destination ? styles.dateText : styles.datePlaceholder}
+                  numberOfLines={1}
+                >
+                  {destination || "Destination"}
+                </Text>
+              </Pressable>
             </View>
 
             <View style={styles.dateRow}>
               <Pressable
                 style={[styles.inputPill, styles.inputHalf]}
-                onPress={() => setShowDatePicker("depart")}
+                onPress={() => openDatePicker("depart")}
               >
                 <Ionicons name="calendar-outline" size={20} color={colors.text.tertiary} />
                 <Text
                   variant="body"
                   style={departDate ? styles.dateText : styles.datePlaceholder}
                 >
-                  {departDate || "Depart"}
+                  {formatDateFieldValue(departDate) || "Depart"}
                 </Text>
               </Pressable>
               <Pressable
                 style={[styles.inputPill, styles.inputHalf]}
-                onPress={() => setShowDatePicker("return")}
+                onPress={() => openDatePicker("return")}
               >
                 <Ionicons name="calendar-outline" size={20} color={colors.text.tertiary} />
                 <Text
                   variant="body"
                   style={returnDate ? styles.dateText : styles.datePlaceholder}
                 >
-                  {returnDate || "Return"}
+                  {formatDateFieldValue(returnDate) || "Return"}
                 </Text>
               </Pressable>
             </View>
@@ -501,41 +918,43 @@ export default function TripsScreen() {
         {/* Hotel Search Form */}
         {activeTab === "hotels" && (
           <View style={styles.searchForm}>
-            <View style={styles.inputPill}>
+            <Pressable
+              style={styles.inputPill}
+              onPress={() => setShowLocationPicker("hotelCity")}
+            >
               <Ionicons name="location-outline" size={20} color={colors.text.tertiary} />
-              <TextInput
-                style={styles.pillInput}
-                placeholder='e.g. "London" or "Marriott Hotel"'
-                placeholderTextColor={colors.text.tertiary}
-                value={hotelCity}
-                onChangeText={setHotelCity}
-                autoCapitalize="words"
-              />
-            </View>
+              <Text
+                variant="body"
+                style={hotelCity ? styles.dateText : styles.datePlaceholder}
+                numberOfLines={1}
+              >
+                {hotelCity || 'e.g. "London" or "Marriott Hotel"'}
+              </Text>
+            </Pressable>
 
             <View style={styles.dateGuestRow}>
               <Pressable
                 style={[styles.inputPill, styles.inputThird]}
-                onPress={() => setShowDatePicker("checkIn")}
+                onPress={() => openDatePicker("checkIn")}
               >
                 <Ionicons name="calendar-outline" size={18} color={colors.text.tertiary} />
                 <Text
                   variant="bodySmall"
                   style={checkIn ? styles.dateText : styles.datePlaceholder}
                 >
-                  {checkIn || "Check-in"}
+                  {formatDateFieldValue(checkIn) || "Check-in"}
                 </Text>
               </Pressable>
               <Pressable
                 style={[styles.inputPill, styles.inputThird]}
-                onPress={() => setShowDatePicker("checkOut")}
+                onPress={() => openDatePicker("checkOut")}
               >
                 <Ionicons name="calendar-outline" size={18} color={colors.text.tertiary} />
                 <Text
                   variant="bodySmall"
                   style={checkOut ? styles.dateText : styles.datePlaceholder}
                 >
-                  {checkOut || "Check-out"}
+                  {formatDateFieldValue(checkOut) || "Check-out"}
                 </Text>
               </Pressable>
               <View style={[styles.inputPill, styles.inputThird]}>
@@ -583,28 +1002,36 @@ export default function TripsScreen() {
           <View style={styles.bookingsSection}>
             {/* Next Flight */}
             {nextBoardingPass && (
-              <Pressable
-                style={styles.nextFlightCard}
-                onPress={() => router.push(`/boarding-passes/${nextBoardingPass.id}` as Href)}
-              >
-                <View style={styles.nextFlightContent}>
-                  <View style={styles.nextFlightIcon}>
-                    <Ionicons name="airplane" size={24} color={colors.brand.default} />
+              <>
+                <Pressable
+                  style={styles.nextFlightCard}
+                  onPress={() => router.push(`/boarding-passes/${nextBoardingPass.id}` as Href)}
+                >
+                  <View style={styles.nextFlightContent}>
+                    <View style={styles.nextFlightIcon}>
+                      <Ionicons name="airplane" size={24} color={colors.brand.default} />
+                    </View>
+                    <View style={styles.nextFlightInfo}>
+                      <Text variant="label" style={styles.nextFlightLabel}>
+                        Upcoming Flight
+                      </Text>
+                      <Text variant="h4">
+                        {nextBoardingPass.travel.originCode} → {nextBoardingPass.travel.destinationCode}
+                      </Text>
+                      <Text variant="caption" color="secondary">
+                        {nextBoardingPass.travel.carrierName} · {formatSingleDate(nextBoardingPass.travel.departDate)}
+                      </Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={24} color={colors.text.tertiary} />
                   </View>
-                  <View style={styles.nextFlightInfo}>
-                    <Text variant="label" style={styles.nextFlightLabel}>
-                      Upcoming Flight
-                    </Text>
-                    <Text variant="h4">
-                      {nextBoardingPass.travel.originCode} → {nextBoardingPass.travel.destinationCode}
-                    </Text>
-                    <Text variant="caption" color="secondary">
-                      {nextBoardingPass.travel.carrierName} · {formatSingleDate(nextBoardingPass.travel.departDate)}
-                    </Text>
-                  </View>
-                  <Ionicons name="chevron-forward" size={24} color={colors.text.tertiary} />
-                </View>
-              </Pressable>
+                </Pressable>
+                <Button
+                  variant="secondary"
+                  onPress={() => router.push("/boarding-passes")}
+                >
+                  View all boarding passes
+                </Button>
+              </>
             )}
 
             {/* Recent Bookings */}
@@ -647,6 +1074,8 @@ export default function TripsScreen() {
                   variant={
                     booking.status === "cancelled"
                       ? "error"
+                      : booking.status === "held"
+                      ? "warning"
                       : booking.mode === "hotel"
                       ? "info"
                       : booking.ticket.issued
@@ -656,6 +1085,8 @@ export default function TripsScreen() {
                     >
                   {booking.status === "cancelled"
                     ? "Cancelled"
+                    : booking.status === "held"
+                    ? "Held"
                     : booking.mode === "hotel"
                     ? "Hotel"
                     : booking.ticket.issued
@@ -693,10 +1124,7 @@ export default function TripsScreen() {
               <Pressable
                 key={offer.offerId}
                 style={styles.offerCard}
-                onPress={() => {
-                  setSelectedOffer(offer);
-                  setShowBookingModal(true);
-                }}
+                onPress={() => beginBookingFlow(offer)}
               >
                 <View style={styles.offerHeader}>
                   <View style={styles.offerInfo}>
@@ -705,6 +1133,9 @@ export default function TripsScreen() {
                     </Text>
                     <Text variant="caption" color="secondary">
                       {offer.carrierName} · {formatSingleDate(offer.departDate)}
+                    </Text>
+                    <Text variant="caption" color="secondary">
+                      {getFlightOfferBookingModeLabel(offer)}
                     </Text>
                   </View>
                   <Text variant="h4" style={styles.offerPrice}>
@@ -718,10 +1149,7 @@ export default function TripsScreen() {
               <Pressable
                 key={offer.offerId}
                 style={styles.offerCard}
-                onPress={() => {
-                  setSelectedOffer(offer);
-                  setShowBookingModal(true);
-                }}
+                onPress={() => beginBookingFlow(offer)}
               >
                 <View style={styles.offerHeader}>
                   <View style={styles.offerInfo}>
@@ -730,6 +1158,9 @@ export default function TripsScreen() {
                     </Text>
                     <Text variant="caption" color="secondary">
                       {offer.cityLabel} · {offer.totalNights} nights
+                    </Text>
+                    <Text variant="caption" color="secondary">
+                      {getHotelOfferBookingModeLabel(offer)}
                     </Text>
                   </View>
                   <Text variant="h4" style={styles.offerPrice}>
@@ -747,16 +1178,28 @@ export default function TripsScreen() {
         visible={showBookingModal}
         animationType="slide"
         transparent
-        onRequestClose={() => setShowBookingModal(false)}
+        onRequestClose={() => {
+          setShowBookingModal(false);
+          setSelectedOffer(null);
+        }}
       >
         <View style={styles.bookingModalOverlay}>
+          <ScrollView
+            style={styles.bookingModalScroll}
+            contentContainerStyle={styles.bookingModalScrollContent}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
           <View style={[styles.bookingModalContent, { paddingBottom: insets.bottom + spacing[4] }]}>
             <View style={styles.modalHeader}>
               <Text variant="h4">Complete Booking</Text>
               <IconButton
                 variant="ghost"
                 size="sm"
-                onPress={() => setShowBookingModal(false)}
+                onPress={() => {
+                  setShowBookingModal(false);
+                  setSelectedOffer(null);
+                }}
                 icon={<Ionicons name="close" size={24} color={colors.text.primary} />}
               />
             </View>
@@ -765,13 +1208,238 @@ export default function TripsScreen() {
               <Ionicons name="person-outline" size={20} color={colors.text.tertiary} />
               <TextInput
                 style={styles.pillInput}
-                placeholder={searchResults.length > 0 ? "Passenger Name" : "Guest Name"}
+                placeholder={
+                  selectedOffer && "originCode" in selectedOffer
+                    ? "Passenger Full Name"
+                    : "Guest Name"
+                }
                 placeholderTextColor={colors.text.tertiary}
                 value={passengerName}
                 onChangeText={setPassengerName}
                 autoCapitalize="words"
               />
             </View>
+
+            {isDuffelFlightOffer(selectedOffer) ? (
+              <>
+                <View
+                  style={[
+                    styles.providerBanner,
+                    selectedOffer.requiresInstantPayment
+                      ? styles.providerBannerWarning
+                      : styles.providerBannerInfo,
+                  ]}
+                >
+                  <Ionicons
+                    name={
+                      selectedOffer.requiresInstantPayment
+                        ? "alert-circle-outline"
+                        : "business-outline"
+                    }
+                    size={18}
+                    color={
+                      selectedOffer.requiresInstantPayment
+                        ? colors.status.warning
+                        : colors.brand.default
+                    }
+                  />
+                  <Text variant="bodySmall" style={styles.providerBannerText}>
+                    {selectedOffer.requiresInstantPayment
+                      ? "This real airline offer requires instant provider payment. Urnway can only place holdable Duffel offers right now."
+                      : "This is a real Duffel flight offer. Urnway will place it as a hold order first."}
+                  </Text>
+                </View>
+
+                <Pressable
+                  style={styles.inputPill}
+                  onPress={() => openDatePicker("passengerBornOn")}
+                >
+                  <Ionicons name="calendar-outline" size={20} color={colors.text.tertiary} />
+                  <Text
+                    variant="body"
+                    style={passengerBornOn ? styles.dateText : styles.datePlaceholder}
+                  >
+                    {formatFullDateFieldValue(passengerBornOn) || "Date of Birth"}
+                  </Text>
+                </Pressable>
+
+                <View style={styles.inputPill}>
+                  <Ionicons name="mail-outline" size={20} color={colors.text.tertiary} />
+                  <TextInput
+                    style={styles.pillInput}
+                    placeholder="Passenger Email"
+                    placeholderTextColor={colors.text.tertiary}
+                    value={passengerEmail}
+                    onChangeText={setPassengerEmail}
+                    autoCapitalize="none"
+                    keyboardType="email-address"
+                  />
+                </View>
+
+                <View style={styles.providerOptionSection}>
+                  <Text variant="label" style={styles.tripAttachLabel}>
+                    Title
+                  </Text>
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.tripAttachRow}
+                  >
+                    {(["mr", "mrs", "ms", "miss", "mx", "dr"] as const).map((title) => (
+                      <Pressable
+                        key={title}
+                        style={[
+                          styles.tripChip,
+                          passengerTitle === title && styles.tripChipActive,
+                        ]}
+                        onPress={() => setPassengerTitle(title)}
+                      >
+                        <Text
+                          variant="caption"
+                          style={
+                            passengerTitle === title
+                              ? styles.tripChipTextActive
+                              : styles.tripChipText
+                          }
+                        >
+                          {title.toUpperCase()}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                </View>
+
+                <View style={styles.providerOptionSection}>
+                  <Text variant="label" style={styles.tripAttachLabel}>
+                    Gender
+                  </Text>
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.tripAttachRow}
+                  >
+                    {([
+                      { value: "m", label: "Male" },
+                      { value: "f", label: "Female" },
+                      { value: "x", label: "Other" },
+                    ] as const).map((gender) => (
+                      <Pressable
+                        key={gender.value}
+                        style={[
+                          styles.tripChip,
+                          passengerGender === gender.value && styles.tripChipActive,
+                        ]}
+                        onPress={() => setPassengerGender(gender.value)}
+                      >
+                        <Text
+                          variant="caption"
+                          style={
+                            passengerGender === gender.value
+                              ? styles.tripChipTextActive
+                              : styles.tripChipText
+                          }
+                        >
+                          {gender.label}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                </View>
+
+                <View style={styles.inputPill}>
+                  <Ionicons name="call-outline" size={20} color={colors.text.tertiary} />
+                  <TextInput
+                    style={styles.pillInput}
+                    placeholder="Phone Number (Optional)"
+                    placeholderTextColor={colors.text.tertiary}
+                    value={passengerPhoneNumber}
+                    onChangeText={setPassengerPhoneNumber}
+                    keyboardType="phone-pad"
+                  />
+                </View>
+              </>
+            ) : null}
+
+            {isDuffelHotelOffer(selectedOffer) ? (
+              <>
+                <View style={[styles.providerBanner, styles.providerBannerInfo]}>
+                  <Ionicons
+                    name="bed-outline"
+                    size={18}
+                    color={colors.brand.default}
+                  />
+                  <Text variant="bodySmall" style={styles.providerBannerText}>
+                    This is a real Duffel Stays rate. Urnway will create a provider-backed stay booking from the selected rate.
+                  </Text>
+                </View>
+
+                <Pressable
+                  style={styles.inputPill}
+                  onPress={() => openDatePicker("passengerBornOn")}
+                >
+                  <Ionicons name="calendar-outline" size={20} color={colors.text.tertiary} />
+                  <Text
+                    variant="body"
+                    style={passengerBornOn ? styles.dateText : styles.datePlaceholder}
+                  >
+                    {formatFullDateFieldValue(passengerBornOn) || "Guest Date of Birth"}
+                  </Text>
+                </Pressable>
+
+                <View style={styles.inputPill}>
+                  <Ionicons name="mail-outline" size={20} color={colors.text.tertiary} />
+                  <TextInput
+                    style={styles.pillInput}
+                    placeholder="Lead Guest Email"
+                    placeholderTextColor={colors.text.tertiary}
+                    value={passengerEmail}
+                    onChangeText={setPassengerEmail}
+                    autoCapitalize="none"
+                    keyboardType="email-address"
+                  />
+                </View>
+
+                <View style={styles.inputPill}>
+                  <Ionicons name="call-outline" size={20} color={colors.text.tertiary} />
+                  <TextInput
+                    style={styles.pillInput}
+                    placeholder="Lead Guest Phone Number"
+                    placeholderTextColor={colors.text.tertiary}
+                    value={passengerPhoneNumber}
+                    onChangeText={setPassengerPhoneNumber}
+                    keyboardType="phone-pad"
+                  />
+                </View>
+              </>
+            ) : null}
+
+            {isLiteApiHotelOffer(selectedOffer) ? (
+              <>
+                <View style={[styles.providerBanner, styles.providerBannerInfo]}>
+                  <Ionicons
+                    name="bed-outline"
+                    size={18}
+                    color={colors.brand.default}
+                  />
+                  <Text variant="bodySmall" style={styles.providerBannerText}>
+                    This is a real liteAPI stay rate. Urnway will prebook the selected room and confirm it using the configured liteAPI account payment method.
+                  </Text>
+                </View>
+
+                <View style={styles.inputPill}>
+                  <Ionicons name="mail-outline" size={20} color={colors.text.tertiary} />
+                  <TextInput
+                    style={styles.pillInput}
+                    placeholder="Lead Guest Email"
+                    placeholderTextColor={colors.text.tertiary}
+                    value={passengerEmail}
+                    onChangeText={setPassengerEmail}
+                    autoCapitalize="none"
+                    keyboardType="email-address"
+                  />
+                </View>
+              </>
+            ) : null}
 
             <View style={styles.inputPill}>
               <Ionicons name="document-text-outline" size={20} color={colors.text.tertiary} />
@@ -785,11 +1453,70 @@ export default function TripsScreen() {
               />
             </View>
 
+            {availableTrips.filter((trip) => trip.lifecycle !== "completed").length > 0 ? (
+              <View style={styles.tripAttachSection}>
+                <Text variant="label" style={styles.tripAttachLabel}>
+                  Attach to trip (optional)
+                </Text>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.tripAttachRow}
+                >
+                  <Pressable
+                    style={[
+                      styles.tripChip,
+                      selectedTripId === null && styles.tripChipActive,
+                    ]}
+                    onPress={() => setSelectedTripId(null)}
+                  >
+                    <Text
+                      variant="caption"
+                      style={
+                        selectedTripId === null
+                          ? styles.tripChipTextActive
+                          : styles.tripChipText
+                      }
+                    >
+                      No trip
+                    </Text>
+                  </Pressable>
+                  {availableTrips
+                    .filter((trip) => trip.lifecycle !== "completed")
+                    .map((trip) => (
+                      <Pressable
+                        key={trip.id}
+                        style={[
+                          styles.tripChip,
+                          selectedTripId === trip.id && styles.tripChipActive,
+                        ]}
+                        onPress={() => setSelectedTripId(trip.id)}
+                      >
+                        <Text
+                          variant="caption"
+                          style={
+                            selectedTripId === trip.id
+                              ? styles.tripChipTextActive
+                              : styles.tripChipText
+                          }
+                        >
+                          {trip.title}
+                        </Text>
+                      </Pressable>
+                    ))}
+                </ScrollView>
+              </View>
+            ) : null}
+
             <Button
               variant="primary"
               size="lg"
               fullWidth
               loading={!!bookingOfferId}
+              disabled={
+                isDuffelFlightOffer(selectedOffer) &&
+                selectedOffer.requiresInstantPayment
+              }
               onPress={() => {
                 if (selectedOffer) {
                   if ("originCode" in selectedOffer) {
@@ -800,9 +1527,12 @@ export default function TripsScreen() {
                 }
               }}
             >
-              Confirm Booking
+              {isDuffelFlightOffer(selectedOffer) && selectedOffer.requiresInstantPayment
+                ? "Instant provider payment required"
+                : "Confirm Booking"}
             </Button>
           </View>
+          </ScrollView>
         </View>
       </Modal>
 
@@ -840,78 +1570,94 @@ export default function TripsScreen() {
         </Pressable>
       </Modal>
 
-      {/* Date Picker Modal */}
-      <Modal
+      <DatePickerSheet
         visible={showDatePicker !== null}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setShowDatePicker(null)}
-      >
-        <Pressable
-          style={styles.datePickerOverlay}
-          onPress={() => setShowDatePicker(null)}
-        >
-          <View style={[styles.datePickerContent, { paddingBottom: insets.bottom + spacing[4] }]}>
-            <View style={styles.datePickerHeader}>
-              <Text variant="h4">
-                {showDatePicker === "depart"
-                  ? "Select Departure Date"
-                  : showDatePicker === "return"
-                  ? "Select Return Date"
-                  : showDatePicker === "checkIn"
-                  ? "Select Check-in Date"
-                  : "Select Check-out Date"}
-              </Text>
-              <IconButton
-                variant="ghost"
-                size="sm"
-                onPress={() => setShowDatePicker(null)}
-                icon={<Ionicons name="close" size={24} color={colors.text.primary} />}
-              />
-            </View>
+        title={
+          showDatePicker === "depart"
+            ? "Select departure date"
+            : showDatePicker === "return"
+            ? "Select return date"
+            : showDatePicker === "checkIn"
+            ? "Select check-in date"
+            : showDatePicker === "checkOut"
+            ? "Select check-out date"
+            : "Select date of birth"
+        }
+        value={
+          showDatePicker === "depart"
+            ? departDate
+            : showDatePicker === "return"
+            ? returnDate
+            : showDatePicker === "checkIn"
+            ? checkIn
+            : showDatePicker === "checkOut"
+            ? checkOut
+            : passengerBornOn
+        }
+        minimumDate={
+          showDatePicker === "return"
+            ? departDate || undefined
+            : showDatePicker === "checkOut"
+            ? checkIn || undefined
+            : undefined
+        }
+        maximumDate={showDatePicker === "passengerBornOn" ? todayIsoDate : undefined}
+        onClose={() => setShowDatePicker(null)}
+        onConfirm={(nextValue) => {
+          if (showDatePicker === "depart") {
+            setDepartDate(nextValue);
+            if (returnDate && returnDate < nextValue) {
+              setReturnDate("");
+            }
+          } else if (showDatePicker === "return") {
+            setReturnDate(nextValue);
+          } else if (showDatePicker === "checkIn") {
+            setCheckIn(nextValue);
+            if (checkOut && checkOut <= nextValue) {
+              setCheckOut("");
+            }
+          } else if (showDatePicker === "checkOut") {
+            setCheckOut(nextValue);
+          } else if (showDatePicker === "passengerBornOn") {
+            setPassengerBornOn(nextValue);
+          }
+        }}
+      />
 
-            <View style={styles.inputPill}>
-              <Ionicons name="calendar-outline" size={20} color={colors.text.tertiary} />
-              <TextInput
-                style={styles.pillInput}
-                placeholder="YYYY-MM-DD"
-                placeholderTextColor={colors.text.tertiary}
-                value={
-                  showDatePicker === "depart"
-                    ? departDate
-                    : showDatePicker === "return"
-                    ? returnDate
-                    : showDatePicker === "checkIn"
-                    ? checkIn
-                    : checkOut
-                }
-                onChangeText={(text) => {
-                  if (showDatePicker === "depart") {
-                    setDepartDate(text);
-                  } else if (showDatePicker === "return") {
-                    setReturnDate(text);
-                  } else if (showDatePicker === "checkIn") {
-                    setCheckIn(text);
-                  } else if (showDatePicker === "checkOut") {
-                    setCheckOut(text);
-                  }
-                }}
-                autoCapitalize="none"
-                autoFocus
-              />
-            </View>
+      <LocationPickerSheet
+        visible={showLocationPicker !== null}
+        title={
+          showLocationPicker === "origin"
+            ? "Choose origin"
+            : showLocationPicker === "destination"
+            ? "Choose destination"
+            : "Choose stay location"
+        }
+        scope={showLocationPicker === "hotelCity" ? "stay" : "flight"}
+        accessToken={tokens?.accessToken}
+        initialValue={
+          showLocationPicker === "origin"
+            ? origin
+            : showLocationPicker === "destination"
+            ? destination
+            : hotelCity
+        }
+        onClose={() => setShowLocationPicker(null)}
+        onSelect={(suggestion) => {
+          if (!showLocationPicker) {
+            return;
+          }
 
-            <Button
-              variant="primary"
-              size="lg"
-              fullWidth
-              onPress={() => setShowDatePicker(null)}
-            >
-              Done
-            </Button>
-          </View>
-        </Pressable>
-      </Modal>
+          applyLocationSelection(showLocationPicker, suggestion);
+        }}
+        onSubmitText={(value) => {
+          if (!showLocationPicker) {
+            return;
+          }
+
+          applyTypedLocation(showLocationPicker, value);
+        }}
+      />
 
       {/* Filters Modal */}
       <Modal
@@ -1392,12 +2138,69 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(0, 0, 0, 0.5)",
     justifyContent: "flex-end",
   },
+  bookingModalScroll: {
+    maxHeight: "90%",
+  },
+  bookingModalScrollContent: {
+    flexGrow: 1,
+    justifyContent: "flex-end",
+  },
   bookingModalContent: {
     backgroundColor: colors.grays.white,
     borderTopLeftRadius: borderRadius["2xl"],
     borderTopRightRadius: borderRadius["2xl"],
     padding: spacing[6],
     gap: spacing[4],
+  },
+  providerBanner: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: spacing[2],
+    padding: spacing[3],
+    borderRadius: borderRadius.lg,
+    borderWidth: 1,
+  },
+  providerBannerInfo: {
+    backgroundColor: colors.brand.light,
+    borderColor: colors.brand.default,
+  },
+  providerBannerWarning: {
+    backgroundColor: colors.status.warningLight,
+    borderColor: colors.status.warning,
+  },
+  providerBannerText: {
+    flex: 1,
+    color: colors.text.secondary,
+  },
+  providerOptionSection: {
+    gap: spacing[2],
+  },
+  tripAttachSection: {
+    gap: spacing[2],
+  },
+  tripAttachLabel: {
+    color: colors.text.secondary,
+  },
+  tripAttachRow: {
+    gap: spacing[2],
+  },
+  tripChip: {
+    paddingHorizontal: spacing[3],
+    paddingVertical: spacing[2],
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.background.secondary,
+    borderWidth: 1,
+    borderColor: colors.border.default,
+  },
+  tripChipActive: {
+    backgroundColor: colors.brand.default,
+    borderColor: colors.brand.default,
+  },
+  tripChipText: {
+    color: colors.text.secondary,
+  },
+  tripChipTextActive: {
+    color: colors.grays.white,
   },
   menuOverlay: {
     flex: 1,

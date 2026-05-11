@@ -15,6 +15,17 @@ const nextConfig: NextConfig = {
     '@mezo-org/orangekit-contracts',
     '@mezo-org/mezo-clay',
   ],
+  webpack: (config) => {
+    config.resolve ??= {};
+    config.resolve.alias ??= {};
+    config.resolve.alias['pino-pretty'] = path.join(
+      configDirectory,
+      'lib',
+      'pino-pretty-stub.cjs'
+    );
+
+    return config;
+  },
 };
 
 export default nextConfig;

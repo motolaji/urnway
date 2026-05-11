@@ -154,6 +154,21 @@ export const routeGroups: ApiRouteGroup[] = [
     ],
   },
   {
+    name: 'Places',
+    description:
+      'Autocomplete helpers for flights, trip destinations, hotels, and address-style search inputs.',
+    routes: [
+      {
+        method: 'GET',
+        path: '/v1/places/autocomplete',
+        summary:
+          'Returns scoped location suggestions for airports, stay destinations, and trip planning inputs.',
+        status: 'available',
+        auth: 'bearer',
+      },
+    ],
+  },
+  {
     name: 'Wallet',
     description:
       'Native BTC balance, MUSD balance, wallet activity, optional borrow handoff support, and card controls.',
@@ -460,14 +475,14 @@ export const routeGroups: ApiRouteGroup[] = [
       {
         method: 'POST',
         path: '/v1/bookings/flights/search',
-        summary: 'Searches demo-ready flight inventory for unplanned booking flows.',
+        summary: 'Searches flight inventory for unplanned booking flows, using Duffel when configured and demo fallback otherwise.',
         status: 'available',
         auth: 'bearer',
       },
       {
         method: 'POST',
         path: '/v1/bookings/flights/book',
-        summary: 'Creates a confirmed flight booking from a selected offer.',
+        summary: 'Creates a flight booking from a selected offer, including Duffel hold orders for supported provider-backed flights.',
         status: 'available',
         auth: 'bearer',
       },
@@ -495,14 +510,14 @@ export const routeGroups: ApiRouteGroup[] = [
       {
         method: 'POST',
         path: '/v1/bookings/hotels/search',
-        summary: 'Searches demo-ready hotel inventory for unplanned stay booking flows.',
+        summary: 'Searches hotel inventory for unplanned stay booking flows, preferring liteAPI when enabled and falling back to demo inventory otherwise.',
         status: 'available',
         auth: 'bearer',
       },
       {
         method: 'POST',
         path: '/v1/bookings/hotels/book',
-        summary: 'Creates a confirmed hotel booking from a selected stay offer.',
+        summary: 'Creates a hotel booking from a selected stay offer, including liteAPI-backed booking support when provider access is enabled.',
         status: 'available',
         auth: 'bearer',
       },

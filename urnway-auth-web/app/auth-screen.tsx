@@ -2,8 +2,9 @@
 
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { useSearchParams } from 'next/navigation';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useAccount, useChainId, useDisconnect, useSignMessage, useSwitchChain } from 'wagmi';
+import { useMemo, useState } from 'react';
+import { stringToHex } from 'viem';
+import { useAccount, useChainId, useDisconnect } from 'wagmi';
 
 import {
   buildBridgeEnvelope,
@@ -17,7 +18,6 @@ import { resetWalletBridgeSession } from '@/lib/wallet-session';
 
 type FlowStage =
   | 'idle'
-  | 'switching_chain'
   | 'requesting_nonce'
   | 'signing'
   | 'handing_off'
@@ -35,33 +35,9 @@ type NonceResponseBody = {
   };
 };
 
-const stages: Array<{ id: FlowStage | 'connected'; label: string; detail: string }> = [
-  {
-    id: 'idle',
-    label: 'Connect wallet',
-    detail: 'Passport opens inside the web app and exposes the connected wallet.',
-  },
-  {
-    id: 'switching_chain',
-    label: 'Switch network',
-    detail: 'Urnway moves the wallet onto Mezo testnet before requesting a signature.',
-  },
-  {
-    id: 'requesting_nonce',
-    label: 'Request nonce',
-    detail: 'The web app asks urnway-api for the message that proves wallet ownership.',
-  },
-  {
-    id: 'signing',
-    label: 'Sign message',
-    detail: 'Passport signs the API-provided message. The signature never gets issued by the web app itself.',
-  },
-  {
-    id: 'handing_off',
-    label: 'Return payload',
-    detail: 'The web app returns walletAddress, message, and signature back to mobile.',
-  },
-];
+type Eip1193Provider = {
+  request(args: { method: string; params?: unknown[] | Record<string, unknown> }): Promise<unknown>;
+};
 
 function formatWalletAddress(walletAddress: string | undefined) {
   if (!walletAddress) {
@@ -77,6 +53,61 @@ function getErrorMessage(error: unknown) {
   }
 
   return 'The auth flow failed unexpectedly.';
+}
+
+function normalizeSignature(result: unknown) {
+  if (typeof result === 'string' && result.startsWith('0x')) {
+    return result;
+  }
+
+  throw new Error('The connected wallet returned an invalid signature response.');
+}
+
+async function signAuthMessage(
+  connector: { getProvider?: (args?: { chainId?: number }) => Promise<unknown> } | undefined,
+  walletAddress: string,
+  message: string
+) {
+  const provider =
+    typeof connector?.getProvider === 'function'
+      ? ((await connector.getProvider()) as Eip1193Provider | undefined)
+      : undefined;
+
+  const activeProvider =
+    provider ||
+    (typeof window !== 'undefined'
+      ? (((window as typeof window & {
+            ethereum?: Eip1193Provider;
+            okxwallet?: Eip1193Provider;
+          }).ethereum ??
+          (window as typeof window & {
+            ethereum?: Eip1193Provider;
+            okxwallet?: Eip1193Provider;
+          }).okxwallet) as Eip1193Provider | undefined)
+      : undefined);
+
+  if (!activeProvider) {
+    throw new Error('No wallet provider was found for message signing.');
+  }
+
+  const hexMessage = stringToHex(message);
+
+  try {
+    return normalizeSignature(
+      await activeProvider.request({
+        method: 'personal_sign',
+        params: [hexMessage, walletAddress],
+      })
+    );
+  } catch (error) {
+    const cause = error as { code?: number; message?: string } | undefined;
+
+    if (cause?.code === 4001) {
+      throw new Error('The signature request was rejected.');
+    }
+
+    throw error;
+  }
 }
 
 async function fetchNonce(apiBaseUrl: string, walletAddress: string) {
@@ -113,12 +144,9 @@ export default function AuthScreen() {
       mobileRedirectUri: redirectOverride || baseConfig.mobileRedirectUri,
     };
   }, [searchParams]);
-  const { address, isConnected } = useAccount();
+  const { address, connector, isConnected } = useAccount();
   const chainId = useChainId();
   const { disconnect } = useDisconnect();
-  const { switchChainAsync } = useSwitchChain();
-  const { signMessageAsync } = useSignMessage();
-  const autoSwitchAttemptedRef = useRef(false);
 
   const [stage, setStage] = useState<FlowStage>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -129,63 +157,15 @@ export default function AuthScreen() {
 
   const bridgeAvailable =
     typeof window !== 'undefined' && Boolean(window.ReactNativeWebView?.postMessage);
-  const onRequiredChain = !isConnected || chainId === mezoTestnet.id;
+  const onRequiredChain = chainId === mezoTestnet.id;
 
   const canStartSigning =
     config.ok &&
     isConnected &&
     Boolean(address) &&
-    onRequiredChain &&
-    stage !== 'switching_chain' &&
     stage !== 'requesting_nonce' &&
     stage !== 'signing' &&
     stage !== 'handing_off';
-
-  useEffect(() => {
-    if (!isConnected || !address || !switchChainAsync) {
-      autoSwitchAttemptedRef.current = false;
-      return;
-    }
-
-    if (chainId === mezoTestnet.id) {
-      autoSwitchAttemptedRef.current = false;
-      return;
-    }
-
-    if (autoSwitchAttemptedRef.current) {
-      return;
-    }
-
-    autoSwitchAttemptedRef.current = true;
-    let active = true;
-
-    void (async () => {
-      try {
-        setErrorMessage(null);
-        setStage('switching_chain');
-        await switchChainAsync({ chainId: mezoTestnet.id });
-
-        if (active) {
-          setStage('idle');
-        }
-      } catch (error) {
-        if (!active) {
-          return;
-        }
-
-        setStage('idle');
-        setErrorMessage(
-          error instanceof Error
-            ? error.message
-            : 'Could not switch to Mezo testnet automatically.'
-        );
-      }
-    })();
-
-    return () => {
-      active = false;
-    };
-  }, [address, chainId, isConnected, switchChainAsync]);
 
   async function handleStartAuth() {
     if (!config.ok) {
@@ -205,23 +185,12 @@ export default function AuthScreen() {
       setDeepLinkUrl(null);
       setUsedWebViewBridge(false);
 
-      if (chainId !== mezoTestnet.id) {
-        if (!switchChainAsync) {
-          throw new Error('Switch the connected wallet to Mezo testnet before signing.');
-        }
-
-        setStage('switching_chain');
-        await switchChainAsync({ chainId: mezoTestnet.id });
-      }
-
       setStage('requesting_nonce');
       const nonce = await fetchNonce(config.apiBaseUrl, address);
       setNonceMessage(nonce.message);
 
       setStage('signing');
-      const signature = await signMessageAsync({
-        message: nonce.message,
-      });
+      const signature = await signAuthMessage(connector, nonce.walletAddress, nonce.message);
 
       const payload = {
         walletAddress: nonce.walletAddress,
@@ -269,41 +238,50 @@ export default function AuthScreen() {
   }
 
   return (
-    <main className="shell">
-      <section className="hero">
-        <p className="eyebrow">Urnway Auth Bridge</p>
-        <h1>Passport signs here. Tokens stay in the API.</h1>
-        <p className="lede">
-          This app is intentionally narrow. It connects the wallet, requests a nonce from
-          <code> urnway-api </code>, signs the message with Mezo Passport, and returns the signed
-          payload to mobile.
+    <main className="bridge-shell">
+      <section className="bridge-card">
+        <div className="bridge-header">
+          <p className="bridge-kicker">Urnway x Mezo Passport</p>
+          <span className={`badge ${config.ok ? 'badge-active' : 'badge-warning'}`}>
+            {config.ok ? 'mezo only' : 'setup needed'}
+          </span>
+        </div>
+
+        <h1 className="bridge-title">Sign in with Mezo Passport</h1>
+        <p className="bridge-copy">
+          Connect the wallet you want to use in Urnway and approve the ownership signature.
+          Mezo network enforcement happens on transaction flows, not on sign-in.
         </p>
-      </section>
 
-      <section className="panel grid">
-        <div className="card">
-          <div className="card-header">
-            <h2>Flow</h2>
-            <span className={`badge ${isConnected ? 'badge-active' : ''}`}>
-              {isConnected ? 'wallet connected' : 'awaiting wallet'}
-            </span>
+        <div className="bridge-summary">
+          <div className="bridge-summary-row">
+            <span>Wallet</span>
+            <strong>{formatWalletAddress(address)}</strong>
           </div>
+          <div className="bridge-summary-row">
+            <span>Network</span>
+            <strong>{onRequiredChain ? 'Mezo testnet' : 'Any connected network'}</strong>
+          </div>
+        </div>
 
-          <ol className="steps">
-            {stages.map((item) => {
-              const isActive = item.id === stage || (item.id === 'idle' && isConnected);
+        <div className="actions bridge-actions">
+          <ConnectButton.Custom>
+            {({ account, mounted, openAccountModal, openConnectModal }) => {
+              const ready = mounted;
+              const connected = ready && !!account;
 
               return (
-                <li className={`step ${isActive ? 'step-active' : ''}`} key={item.label}>
-                  <strong>{item.label}</strong>
-                  <span>{item.detail}</span>
-                </li>
+                <button
+                  className="secondary-button"
+                  onClick={connected ? openAccountModal : openConnectModal}
+                  type="button"
+                >
+                  {connected ? formatWalletAddress(account.address) : 'Connect wallet'}
+                </button>
               );
-            })}
-          </ol>
+            }}
+          </ConnectButton.Custom>
 
-          <div className="actions">
-            <ConnectButton label={isConnected ? 'Switch wallet' : 'Connect wallet'} />
             <button
               className="primary-button"
               disabled={!canStartSigning}
@@ -311,118 +289,42 @@ export default function AuthScreen() {
               type="button"
             >
               {stage === 'requesting_nonce'
-                ? 'Requesting nonce...'
-                : stage === 'switching_chain'
-                  ? 'Switching to Mezo testnet...'
-                  : stage === 'signing'
-                    ? 'Waiting for signature...'
-                    : stage === 'handing_off'
-                      ? 'Handing off...'
-                      : 'Request nonce and sign'}
+                ? 'Preparing sign-in...'
+                : stage === 'signing'
+                  ? 'Waiting for signature...'
+                  : stage === 'handing_off'
+                    ? 'Returning to Urnway...'
+                    : 'Continue'}
             </button>
-            <button className="secondary-button" onClick={handleReset} type="button">
-              Reset flow
-            </button>
-          </div>
         </div>
 
-        <div className="card">
-          <div className="card-header">
-            <h2>Runtime</h2>
-            <span className={`badge ${config.ok ? 'badge-active' : 'badge-warning'}`}>
-              {config.ok ? 'env ready' : 'env missing'}
-            </span>
-          </div>
-
-          <dl className="details">
-            <div>
-              <dt>Wallet</dt>
-              <dd>{formatWalletAddress(address)}</dd>
-            </div>
-            <div>
-              <dt>Connected chain</dt>
-              <dd>{chainId ? `${chainId}` : 'Not connected'}</dd>
-            </div>
-            <div>
-              <dt>Required chain</dt>
-              <dd>{mezoTestnet.id} (Mezo testnet)</dd>
-            </div>
-            <div>
-              <dt>API base URL</dt>
-              <dd>{config.ok ? config.apiBaseUrl : 'Missing'}</dd>
-            </div>
-            <div>
-              <dt>WebView bridge</dt>
-              <dd>{bridgeAvailable ? 'Detected' : 'Not detected'}</dd>
-            </div>
-            <div>
-              <dt>Deep-link fallback</dt>
-              <dd>{config.ok && config.mobileRedirectUri ? config.mobileRedirectUri : 'Not configured'}</dd>
-            </div>
-          </dl>
-
-          {nonceMessage ? (
-            <div className="message-preview">
-              <p className="section-label">Nonce message</p>
-              <pre>{nonceMessage}</pre>
-            </div>
-          ) : null}
-        </div>
-      </section>
-
-      <section className="panel grid">
-        <div className="card">
-          <div className="card-header">
-            <h2>Bridge payload</h2>
-            <span className={`badge ${authPayload ? 'badge-active' : ''}`}>
-              {authPayload ? 'ready' : 'empty'}
-            </span>
-          </div>
-
-          <p className="muted">
-            Mobile should receive this exact payload shape and forward it to
-            <code> POST /v1/auth/verify </code>.
+        {stage === 'success' ? (
+          <p className="success-text">
+            Sign-in approved. Returning to Urnway now.
           </p>
+        ) : null}
 
-          <pre className="payload">
-            {JSON.stringify(
-              authPayload ?? {
-                walletAddress: '<wallet address>',
-                message: '<nonce message>',
-                signature: '<wallet signature>',
-              },
-              null,
-              2
-            )}
-          </pre>
-        </div>
+        {deepLinkUrl && !usedWebViewBridge ? (
+          <a className="link-button" href={deepLinkUrl}>
+            Return to app
+          </a>
+        ) : null}
 
-        <div className="card">
-          <div className="card-header">
-            <h2>Status</h2>
-            <span
-              className={`badge ${
-                stage === 'success' ? 'badge-active' : stage === 'error' ? 'badge-warning' : ''
-              }`}
-            >
-              {stage}
-            </span>
-          </div>
+        {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
 
-          <ul className="status-list">
-            <li>Posted to React Native WebView: {usedWebViewBridge ? 'yes' : 'no'}</li>
-            <li>Deep link generated: {deepLinkUrl ? 'yes' : 'no'}</li>
-            <li>Auto-selected Mezo testnet: {onRequiredChain ? 'yes' : 'pending'}</li>
-            <li>API verify happens in mobile, not in this app.</li>
-          </ul>
+        {!config.ok ? <p className="muted bridge-muted">{config.error}</p> : null}
+        {nonceMessage && stage === 'signing' ? (
+          <p className="muted bridge-muted">Passport is waiting for your signature.</p>
+        ) : null}
+        {authPayload && stage === 'success' ? (
+          <p className="muted bridge-muted">Wallet proof has been handed back to mobile.</p>
+        ) : null}
 
-          {deepLinkUrl ? (
-            <a className="link-button" href={deepLinkUrl}>
-              Open mobile fallback
-            </a>
-          ) : null}
-
-          {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
+        <div className="bridge-footer">
+          <button className="text-button" onClick={handleReset} type="button">
+            Reset
+          </button>
+          <span>API verification happens in the mobile app.</span>
         </div>
       </section>
     </main>

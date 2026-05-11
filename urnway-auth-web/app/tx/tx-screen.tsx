@@ -11,6 +11,7 @@ import {
   useSwitchChain,
 } from 'wagmi';
 
+import { switchToChainWithFallback } from '@/lib/chain-switch';
 import { mezoTestnet } from '@/lib/passport';
 import { buildTransactionDeepLink } from '@/lib/tx-bridge';
 import { resetWalletBridgeSession } from '@/lib/wallet-session';
@@ -43,29 +44,6 @@ type TransactionRuntimeConfig =
       ok: false;
       error: string;
     };
-
-const steps: Array<{ id: FlowStage | 'connected'; label: string; detail: string }> = [
-  {
-    id: 'idle',
-    label: 'Connect wallet',
-    detail: 'Use Passport to connect the wallet that should submit the MUSD transfer.',
-  },
-  {
-    id: 'switching_chain',
-    label: 'Switch network',
-    detail: 'Move to the expected Mezo network before submitting the transfer.',
-  },
-  {
-    id: 'submitting',
-    label: 'Send transaction',
-    detail: 'Approve the ERC-20 transfer in your wallet.',
-  },
-  {
-    id: 'submitted',
-    label: 'Return to Urnway',
-    detail: 'The transaction hash is handed back to mobile for balance refresh.',
-  },
-];
 
 function readRequired(value: string | null, fieldName: string) {
   if (!value || value.trim().length === 0) {
@@ -153,7 +131,7 @@ function readTransactionRuntimeConfig(
 export default function TxScreen() {
   const searchParams = useSearchParams();
   const config = useMemo(() => readTransactionRuntimeConfig(searchParams), [searchParams]);
-  const { address, chainId, isConnected } = useAccount();
+  const { address, chainId, connector, isConnected } = useAccount();
   const { disconnect } = useDisconnect();
   const { switchChainAsync } = useSwitchChain();
   const { sendTransactionAsync } = useSendTransaction();
@@ -200,7 +178,10 @@ export default function TxScreen() {
       try {
         setErrorMessage(null);
         setStage('switching_chain');
-        await switchChainAsync({ chainId: config.request.chainId });
+        await switchToChainWithFallback(switchChainAsync, {
+          ...mezoTestnet,
+          id: config.request.chainId,
+        }, connector);
 
         if (active) {
           setStage('idle');
@@ -249,7 +230,10 @@ export default function TxScreen() {
 
       if (chainId !== config.request.chainId && switchChainAsync) {
         setStage('switching_chain');
-        await switchChainAsync({ chainId: config.request.chainId });
+        await switchToChainWithFallback(switchChainAsync, {
+          ...mezoTestnet,
+          id: config.request.chainId,
+        }, connector);
       }
 
       setStage('submitting');
@@ -295,166 +279,100 @@ export default function TxScreen() {
   }
 
   return (
-    <main className="shell">
-      <section className="hero">
-        <p className="eyebrow">Urnway Transaction Bridge</p>
-        <h1>Passport sends here. Urnway refreshes after return.</h1>
-        <p className="lede">
-          This page receives a prepared MUSD transfer request from mobile, asks the connected
-          wallet to submit it, and returns the resulting transaction hash back to Urnway.
+    <main className="bridge-shell">
+      <section className="bridge-card">
+        <div className="bridge-header">
+          <p className="bridge-kicker">Urnway transaction</p>
+          <span className={`badge ${config.ok ? 'badge-active' : 'badge-warning'}`}>
+            {config.ok ? 'mezo only' : 'invalid request'}
+          </span>
+        </div>
+
+        <h1 className="bridge-title">Approve transfer</h1>
+        <p className="bridge-copy">
+          This transfer is prepared by Urnway and submitted through Mezo Passport. The wallet is
+          switched to Mezo automatically before approval.
         </p>
-      </section>
 
-      <section className="panel grid">
-        <div className="card">
-          <div className="card-header">
-            <h2>Flow</h2>
-            <span className={`badge ${isConnected ? 'badge-active' : ''}`}>
-              {isConnected ? 'wallet connected' : 'awaiting wallet'}
-            </span>
+        {config.ok ? (
+          <div className="bridge-summary">
+            <div className="bridge-summary-row">
+              <span>Recipient</span>
+              <strong>{config.recipientName || config.request.to}</strong>
+            </div>
+            <div className="bridge-summary-row">
+              <span>Amount</span>
+              <strong>{config.amount || 'Not provided'} MUSD</strong>
+            </div>
+            <div className="bridge-summary-row">
+              <span>Wallet</span>
+              <strong>{formatWalletAddress(address)}</strong>
+            </div>
+            <div className="bridge-summary-row">
+              <span>Network</span>
+              <strong>
+                {chainId === config.request.chainId ? 'Mezo testnet' : 'Switching to Mezo...'}
+              </strong>
+            </div>
           </div>
+        ) : null}
 
-          <ol className="steps">
-            {steps.map((item) => {
-              const isActive = item.id === stage || (item.id === 'idle' && isConnected);
+        <div className="actions bridge-actions">
+          <ConnectButton.Custom>
+            {({ account, mounted, openAccountModal, openConnectModal }) => {
+              const ready = mounted;
+              const connected = ready && !!account;
 
               return (
-                <li className={`step ${isActive ? 'step-active' : ''}`} key={item.label}>
-                  <strong>{item.label}</strong>
-                  <span>{item.detail}</span>
-                </li>
+                <button
+                  className="secondary-button"
+                  onClick={connected ? openAccountModal : openConnectModal}
+                  type="button"
+                >
+                  {connected ? formatWalletAddress(account.address) : 'Connect wallet'}
+                </button>
               );
-            })}
-          </ol>
+            }}
+          </ConnectButton.Custom>
 
-          <div className="actions">
-            <ConnectButton label={isConnected ? 'Switch wallet' : 'Connect wallet'} />
-            <button
-              className="primary-button"
-              disabled={!canSubmit}
-              onClick={handleSubmit}
-              type="button"
-            >
-              {stage === 'switching_chain'
-                ? 'Switching network...'
-                : stage === 'submitting'
-                  ? 'Waiting for wallet approval...'
-                  : 'Submit transfer'}
-            </button>
-            <button className="secondary-button" onClick={handleReset} type="button">
-              Reset flow
-            </button>
-          </div>
-
-          {!senderMatches ? (
-            <p className="error-text">
-              The connected wallet does not match the preflight sender. Switch to the same wallet
-              before submitting.
-            </p>
-          ) : null}
-
-          {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
+          <button
+            className="primary-button"
+            disabled={!canSubmit}
+            onClick={handleSubmit}
+            type="button"
+          >
+            {stage === 'switching_chain'
+              ? 'Switching to Mezo...'
+              : stage === 'submitting'
+                ? 'Waiting for approval...'
+                : 'Approve transfer'}
+          </button>
         </div>
 
-        <div className="card">
-          <div className="card-header">
-            <h2>Request</h2>
-            <span className={`badge ${config.ok ? 'badge-active' : 'badge-warning'}`}>
-              {config.ok ? 'ready' : 'invalid'}
-            </span>
-          </div>
-
-          {config.ok ? (
-            <>
-              <dl className="details">
-                <div>
-                  <dt>Connected wallet</dt>
-                  <dd>{formatWalletAddress(address)}</dd>
-                </div>
-                <div>
-                  <dt>Recipient</dt>
-                  <dd>{config.recipientName || config.request.to}</dd>
-                </div>
-                <div>
-                  <dt>Amount</dt>
-                  <dd>{config.amount || 'Not provided'} MUSD</dd>
-                </div>
-                <div>
-                  <dt>Chain</dt>
-                  <dd>
-                    {config.request.chainId}
-                    {config.request.chainId === mezoTestnet.id ? ' (Mezo testnet)' : ''}
-                  </dd>
-                </div>
-                <div>
-                  <dt>Connected chain</dt>
-                  <dd>{chainId ? `${chainId}` : 'Not connected'}</dd>
-                </div>
-                <div>
-                  <dt>Expected sender</dt>
-                  <dd>{config.expectedSender || 'Any connected wallet'}</dd>
-                </div>
-              </dl>
-
-              <pre className="payload">
-                {JSON.stringify(
-                  {
-                    to: config.request.to,
-                    data: config.request.data,
-                    value: `0x${config.request.value.toString(16)}`,
-                    chainId: config.request.chainId,
-                    gas: config.request.gas
-                      ? `0x${config.request.gas.toString(16)}`
-                      : null,
-                    gasPrice: config.request.gasPrice
-                      ? `0x${config.request.gasPrice.toString(16)}`
-                      : null,
-                  },
-                  null,
-                  2
-                )}
-              </pre>
-            </>
-          ) : (
-            <p className="error-text">{config.error}</p>
-          )}
-        </div>
-      </section>
-
-      <section className="panel grid">
-        <div className="card">
-          <div className="card-header">
-            <h2>Callback</h2>
-            <span className={`badge ${txHash ? 'badge-active' : ''}`}>
-              {txHash ? 'ready' : 'pending'}
-            </span>
-          </div>
-
-          <p className="muted">
-            Once the wallet submits the transfer, this callback URL returns the transaction hash to
-            mobile so Urnway can refresh balances and continue the flow.
+        {!senderMatches ? (
+          <p className="error-text">
+            The connected wallet does not match the wallet used during preflight.
           </p>
+        ) : null}
 
-          <pre className="payload">
-            {deepLinkUrl ||
-              JSON.stringify(
-                {
-                  status: 'submitted',
-                  txHash: '<transaction hash>',
-                  slug: config.ok ? config.slug : '<payment-link slug>',
-                },
-                null,
-                2
-              )}
-          </pre>
+        {stage === 'submitted' ? (
+          <p className="success-text">Transfer submitted. Returning to Urnway now.</p>
+        ) : null}
 
-          {deepLinkUrl ? (
-            <div className="actions">
-              <a className="link-button" href={deepLinkUrl}>
-                Return to Urnway now
-              </a>
-            </div>
-          ) : null}
+        {deepLinkUrl ? (
+          <a className="link-button" href={deepLinkUrl}>
+            Return to app
+          </a>
+        ) : null}
+
+        {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
+        {!config.ok ? <p className="error-text">{config.error}</p> : null}
+
+        <div className="bridge-footer">
+          <button className="text-button" onClick={handleReset} type="button">
+            Reset
+          </button>
+          <span>Urnway refreshes balances after the tx hash returns.</span>
         </div>
       </section>
     </main>

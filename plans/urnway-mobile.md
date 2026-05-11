@@ -12,6 +12,7 @@
 - [x] Home screen reflects the current auth and dashboard slice
 - [x] Home screen now shows an API-backed wallet snapshot
 - [x] Pay screen now supports send-by-username plus payment links through submit, pending, stale/reset, and confirmed states
+- [x] Trips and booking forms now use scoped location suggestions plus native date picker sheets for key place/date inputs
 - [ ] Full Profile surface still needs expansion, and Trips still needs hotels, refunds, and broader transport layers
 - [x] WebView auth integration exists
 - [x] Secure token storage and refresh handling exist
@@ -127,6 +128,7 @@ what the user does with MUSD next.
 - [x] Build trip list screen
 - [x] Build create trip flow
 - [x] Build trip detail screen
+- [x] Add place suggestion and date-picker UX for booking-first trip search and manual trip planning inputs
 - [x] Build itinerary view and edit flow
 - [x] Add AI itinerary draft review and accept flow
 - [x] Build spend-vs-budget views
@@ -142,14 +144,17 @@ what the user does with MUSD next.
 ### Booking and boarding-pass screens
 
 - [x] Build flight search UI
+- [x] Add real-provider Duffel flight offer support with extra passenger fields for holdable bookings
 - [x] Build hotel search UI
+- [x] Add hotel provider-aware booking fields for real-provider hotel bookings, now supporting liteAPI with demo fallback
 - [x] Build booking confirmation flow
+- [x] Allow flight and hotel bookings to link into an existing trip
 - [x] Build booking detail flow
 - [x] Build booking cancellation flow
 - [x] Build refund status UI
-- [ ] Build boarding-pass list screen
+- [x] Build boarding-pass list screen
 - [x] Build boarding-pass detail screen
-- [ ] Add offline-ready boarding-pass access strategy
+- [x] Add offline-ready boarding-pass access strategy
 
 ## Notifications and profile
 

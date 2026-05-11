@@ -135,6 +135,10 @@ export const bookings = pgTable('bookings', {
     .notNull()
     .references(() => users.id, { onDelete: 'cascade' }),
   tripId: uuid('trip_id').references(() => trips.id, { onDelete: 'set null' }),
+  provider: text('provider').default('demo').notNull(),
+  providerOfferId: text('provider_offer_id'),
+  providerOrderId: text('provider_order_id'),
+  holdExpiresAt: timestamp('hold_expires_at', { withTimezone: true }),
   mode: text('mode').default('flight').notNull(),
   status: text('status').default('confirmed').notNull(),
   originLabel: text('origin_label').notNull(),

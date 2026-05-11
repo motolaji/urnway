@@ -6,6 +6,10 @@ import { boardingPasses, bookings } from '../../db/schema.js';
 type CreateBookingRecordInput = {
   userId: string;
   tripId?: string | null;
+  provider?: string;
+  providerOfferId?: string | null;
+  providerOrderId?: string | null;
+  holdExpiresAt?: Date | null;
   mode?: string;
   status?: string;
   originLabel: string;
@@ -30,6 +34,8 @@ type CreateBookingRecordInput = {
 
 type UpdateBookingRecordInput = Partial<{
   tripId: string | null;
+  providerOrderId: string | null;
+  holdExpiresAt: Date | null;
   status: string;
   refundStatus: string;
   refundAmount: string;
@@ -64,6 +70,10 @@ export async function createBookingRecord(input: CreateBookingRecordInput) {
     .values({
       userId: input.userId,
       tripId: input.tripId ?? null,
+      provider: input.provider ?? 'demo',
+      providerOfferId: input.providerOfferId ?? null,
+      providerOrderId: input.providerOrderId ?? null,
+      holdExpiresAt: input.holdExpiresAt ?? null,
       mode: input.mode ?? 'flight',
       status: input.status ?? 'confirmed',
       originLabel: input.originLabel,

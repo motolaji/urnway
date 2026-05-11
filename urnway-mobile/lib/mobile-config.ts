@@ -1,6 +1,6 @@
 import Constants from "expo-constants";
 import * as Linking from "expo-linking";
-import { NativeModules } from "react-native";
+import { NativeModules, Platform } from "react-native";
 
 const DEFAULT_API_BASE_URL = "http://localhost:4000";
 const DEFAULT_AUTH_WEB_URL = "http://localhost:3000";
@@ -54,6 +54,18 @@ function readNativeDevelopmentHost() {
   }
 }
 
+function readHostFromMaybeUrl(value: string | undefined | null) {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    return new URL(value).hostname;
+  } catch {
+    return value.split(":")[0] ?? null;
+  }
+}
+
 function readExpoDevelopmentHost() {
   const manifest2HostUri = (
     Constants as typeof Constants & {
@@ -67,23 +79,40 @@ function readExpoDevelopmentHost() {
     }
   ).manifest2?.extra?.expoClient?.hostUri;
 
-  const hostUri =
-    Constants.expoConfig?.hostUri ??
-    Constants.expoGoConfig?.hostUri ??
-    manifest2HostUri ??
-    Constants.platform?.hostUri;
+  const hostCandidates = [
+    Constants.expoConfig?.hostUri,
+    Constants.expoGoConfig?.hostUri,
+    manifest2HostUri,
+    Constants.platform?.hostUri,
+    (
+      Constants as typeof Constants & {
+        experienceUrl?: string;
+        intentUri?: string;
+      }
+    ).experienceUrl,
+    (
+      Constants as typeof Constants & {
+        experienceUrl?: string;
+        intentUri?: string;
+      }
+    ).intentUri,
+  ]
+    .map((candidate) => readHostFromMaybeUrl(candidate))
+    .filter(Boolean) as string[];
 
-  if (!hostUri) {
-    return readNativeDevelopmentHost();
+  const nonLocalHost = hostCandidates.find(
+    (host) => !["localhost", "127.0.0.1"].includes(host)
+  );
+
+  if (nonLocalHost) {
+    return nonLocalHost;
   }
 
-  const host = hostUri.split(":")[0] ?? null;
-
-  if (!host || ["localhost", "127.0.0.1"].includes(host)) {
-    return readNativeDevelopmentHost() ?? host;
+  if (hostCandidates[0]) {
+    return readNativeDevelopmentHost() ?? hostCandidates[0];
   }
 
-  return host;
+  return readNativeDevelopmentHost();
 }
 
 function resolveDevelopmentHost(value: string) {
@@ -216,4 +245,23 @@ export function getMobileNetworkHint() {
     authWebUrl: `http://${developmentHost}:3000`,
     apiBaseUrl: `http://${developmentHost}:4000`,
   };
+}
+
+export function buildAndroidEmulatorFallbackUrl(value: string) {
+  if (Platform.OS !== "android" || !__DEV__) {
+    return null;
+  }
+
+  try {
+    const url = new URL(value);
+
+    if (!["localhost", "127.0.0.1"].includes(url.hostname)) {
+      return null;
+    }
+
+    url.hostname = "10.0.2.2";
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
 }

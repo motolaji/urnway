@@ -17,7 +17,11 @@ import {
   parseAuthBridgeMessage,
   parseAuthCallbackUrl,
 } from "@/lib/auth-contract";
-import { buildAuthWebUrl, getMobileRedirectUri } from "@/lib/mobile-config";
+import {
+  buildAndroidEmulatorFallbackUrl,
+  buildAuthWebUrl,
+  getMobileRedirectUri,
+} from "@/lib/mobile-config";
 import { useSession } from "@/providers/session-provider";
 
 type BrowserStatus = "idle" | "opening" | "webview";
@@ -55,6 +59,10 @@ export default function AuthBrowserModalScreen() {
     : params.return_to;
 
   const authWebUrl = buildAuthWebUrl();
+  const androidFallbackAuthWebUrl = useMemo(
+    () => buildAndroidEmulatorFallbackUrl(authWebUrl),
+    [authWebUrl]
+  );
   const redirectUri = getMobileRedirectUri();
   const authWebOrigin = useMemo(() => {
     try {
@@ -64,6 +72,7 @@ export default function AuthBrowserModalScreen() {
     }
   }, [authWebUrl]);
   const isAndroidInAppBrowser = Platform.OS === "android";
+  const [androidWebViewUrl, setAndroidWebViewUrl] = useState(authWebUrl);
   const showWebView = isAndroidInAppBrowser && browserStatus === "webview";
   const isBusy =
     browserStatus === "opening" ||
@@ -85,6 +94,21 @@ export default function AuthBrowserModalScreen() {
   function resetFlowState() {
     authHandledRef.current = false;
     setBrowserStatus("idle");
+    setAndroidWebViewUrl(authWebUrl);
+  }
+
+  function retryAndroidWebViewWithFallback() {
+    if (
+      !isAndroidInAppBrowser ||
+      !androidFallbackAuthWebUrl ||
+      androidFallbackAuthWebUrl === androidWebViewUrl
+    ) {
+      return false;
+    }
+
+    setBrowserError(null);
+    setAndroidWebViewUrl(androidFallbackAuthWebUrl);
+    return true;
   }
 
   async function handleWebViewMessage(event: WebViewMessageEvent) {
@@ -167,6 +191,7 @@ export default function AuthBrowserModalScreen() {
     authHandledRef.current = false;
 
     if (isAndroidInAppBrowser) {
+      setAndroidWebViewUrl(authWebUrl);
       setBrowserStatus("webview");
       return;
     }
@@ -241,7 +266,7 @@ export default function AuthBrowserModalScreen() {
 
             <View style={styles.webViewCard}>
               <WebView
-                source={{ uri: authWebUrl }}
+                source={{ uri: androidWebViewUrl }}
                 originWhitelist={["*"]}
                 onMessage={(event) => {
                   void handleWebViewMessage(event);
@@ -250,6 +275,10 @@ export default function AuthBrowserModalScreen() {
                 setSupportMultipleWindows={false}
                 startInLoadingState
                 onError={(event) => {
+                  if (retryAndroidWebViewWithFallback()) {
+                    return;
+                  }
+
                   setBrowserError(event.nativeEvent.description);
                   setBrowserStatus("idle");
                   authHandledRef.current = false;

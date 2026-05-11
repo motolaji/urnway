@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 const amountPattern = /^\d+(\.\d+)?$/;
 const isoDatePattern = /^\d{4}-\d{2}-\d{2}$/;
+const providerIdSchema = z.string().trim().min(1);
 
 const travelLabelSchema = z
   .string()
@@ -100,7 +101,13 @@ export const hotelSearchSchema = z
   });
 
 const flightOfferSchema = z.object({
-  offerId: z.string().trim().min(1).max(120),
+  offerId: providerIdSchema,
+  provider: z.enum(['demo', 'duffel']).default('demo'),
+  providerOfferId: providerIdSchema.nullable().optional(),
+  providerOfferRequestId: providerIdSchema.nullable().optional(),
+  providerPassengerIds: z.array(providerIdSchema).optional(),
+  expiresAt: z.string().trim().datetime().nullable().optional(),
+  requiresInstantPayment: z.boolean().optional(),
   originLabel: travelLabelSchema,
   originCode: z.string().trim().length(3, 'originCode must be 3 characters'),
   destinationLabel: travelLabelSchema,
@@ -126,7 +133,13 @@ const flightOfferSchema = z.object({
 });
 
 const hotelOfferSchema = z.object({
-  offerId: z.string().trim().min(1).max(120),
+  offerId: providerIdSchema,
+  provider: z.enum(['demo', 'duffel', 'liteapi']).default('demo'),
+  providerSearchResultId: providerIdSchema.nullable().optional(),
+  providerRateId: providerIdSchema.nullable().optional(),
+  providerAccommodationId: providerIdSchema.nullable().optional(),
+  expiresAt: z.string().trim().datetime().nullable().optional(),
+  paymentType: z.string().trim().min(2).max(40).optional(),
   cityLabel: travelLabelSchema,
   cityCode: z.string().trim().length(3, 'cityCode must be 3 characters'),
   hotelName: z.string().trim().min(2).max(80),
@@ -158,8 +171,66 @@ export const createFlightBookingSchema = z.object({
     .trim()
     .min(2, 'passengerName is required')
     .max(80, 'passengerName must be 80 characters or fewer'),
+  bornOn: z
+    .string()
+    .trim()
+    .regex(isoDatePattern, 'bornOn must be YYYY-MM-DD')
+    .optional(),
+  email: z.string().trim().email('email must be valid').optional(),
+  phoneNumber: z
+    .string()
+    .trim()
+    .min(6, 'phoneNumber must be at least 6 characters')
+    .max(24, 'phoneNumber must be 24 characters or fewer')
+    .optional(),
+  title: z.enum(['mr', 'mrs', 'ms', 'miss', 'mx', 'dr']).optional(),
+  gender: z.enum(['m', 'f', 'x']).optional(),
   tripId: z.string().uuid().optional(),
   note: z.string().trim().max(240).optional(),
+}).superRefine((value, ctx) => {
+  if (value.offer.provider !== 'duffel') {
+    return;
+  }
+
+  if (!value.bornOn) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['bornOn'],
+      message: 'bornOn is required for Duffel flight bookings',
+    });
+  }
+
+  if (!value.email) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['email'],
+      message: 'email is required for Duffel flight bookings',
+    });
+  }
+
+  if (!value.phoneNumber) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['phoneNumber'],
+      message: 'phoneNumber is required for Duffel flight bookings',
+    });
+  }
+
+  if (!value.title) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['title'],
+      message: 'title is required for Duffel flight bookings',
+    });
+  }
+
+  if (!value.gender) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['gender'],
+      message: 'gender is required for Duffel flight bookings',
+    });
+  }
 });
 
 export const createHotelBookingSchema = z.object({
@@ -169,8 +240,56 @@ export const createHotelBookingSchema = z.object({
     .trim()
     .min(2, 'guestName is required')
     .max(80, 'guestName must be 80 characters or fewer'),
+  bornOn: z
+    .string()
+    .trim()
+    .regex(isoDatePattern, 'bornOn must be YYYY-MM-DD')
+    .optional(),
+  email: z.string().trim().email('email must be valid').optional(),
+  phoneNumber: z
+    .string()
+    .trim()
+    .min(6, 'phoneNumber must be at least 6 characters')
+    .max(24, 'phoneNumber must be 24 characters or fewer')
+    .optional(),
   tripId: z.string().uuid().optional(),
   note: z.string().trim().max(240).optional(),
+}).superRefine((value, ctx) => {
+  if (value.offer.provider === 'duffel') {
+    if (!value.bornOn) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['bornOn'],
+        message: 'bornOn is required for Duffel hotel bookings',
+      });
+    }
+
+    if (!value.email) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['email'],
+        message: 'email is required for Duffel hotel bookings',
+      });
+    }
+
+    if (!value.phoneNumber) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['phoneNumber'],
+        message: 'phoneNumber is required for Duffel hotel bookings',
+      });
+    }
+
+    return;
+  }
+
+  if (value.offer.provider === 'liteapi' && !value.email) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['email'],
+      message: 'email is required for liteAPI hotel bookings',
+    });
+  }
 });
 
 export const ticketIssueSchema = z.object({});

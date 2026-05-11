@@ -5,7 +5,12 @@ import { ActivityIndicator, StyleSheet, View } from "react-native";
 import BlurScrollScreen from "@/components/blur-scroll-screen";
 import { Badge, Card, Text } from "@/components/ui";
 import { colors, spacing } from "@/constants/design-tokens";
-import { ApiError, fetchBoardingPass, type BoardingPass } from "@/lib/session";
+import {
+  ApiError,
+  fetchBoardingPassWithCache,
+  type BoardingPass,
+  type CachedResourceSource,
+} from "@/lib/session";
 import { useSession } from "@/providers/session-provider";
 
 function formatDate(value: string) {
@@ -23,6 +28,8 @@ export default function BoardingPassDetailScreen() {
   const [boardingPass, setBoardingPass] = useState<BoardingPass | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [source, setSource] = useState<CachedResourceSource>("network");
+  const [cachedAt, setCachedAt] = useState<string | null>(null);
 
   useEffect(() => {
     if (!tokens?.accessToken || !boardingPassId) {
@@ -37,7 +44,7 @@ export default function BoardingPassDetailScreen() {
       setErrorMessage(null);
 
       try {
-        const loadedBoardingPass = await fetchBoardingPass(
+        const result = await fetchBoardingPassWithCache(
           boardingPassId,
           tokens.accessToken
         );
@@ -46,7 +53,9 @@ export default function BoardingPassDetailScreen() {
           return;
         }
 
-        setBoardingPass(loadedBoardingPass);
+        setBoardingPass(result.boardingPass);
+        setSource(result.source);
+        setCachedAt(result.cachedAt);
       } catch (error) {
         if (!isActive) {
           return;
@@ -78,6 +87,20 @@ export default function BoardingPassDetailScreen() {
           Ticket issuance and boarding-pass viewing now exist for flights. Other transport can follow later.
         </Text>
       </View>
+
+      {source === "cache" ? (
+        <Card variant="outlined" style={styles.messageCard}>
+          <Badge variant="warning">Offline cache</Badge>
+          <Text variant="bodySmall" color="secondary">
+            Showing the last saved copy{cachedAt ? ` from ${new Date(cachedAt).toLocaleString("en-US", {
+              month: "short",
+              day: "numeric",
+              hour: "numeric",
+              minute: "2-digit",
+            })}.` : "."}
+          </Text>
+        </Card>
+      ) : null}
 
       {errorMessage ? (
         <Card variant="outlined" style={styles.messageCard}>

@@ -98,6 +98,10 @@ export default function RootLayout() {
               options={{ headerShown: false }}
             />
             <Stack.Screen
+              name="boarding-passes/index"
+              options={{ headerShown: false }}
+            />
+            <Stack.Screen
               name="boarding-passes/[id]"
               options={{ headerShown: false }}
             />

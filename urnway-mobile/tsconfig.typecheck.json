@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "react": ["./node_modules/@types/react"],
+      "react/jsx-dev-runtime": ["./node_modules/@types/react/jsx-dev-runtime"],
+      "react/jsx-runtime": ["./node_modules/@types/react/jsx-runtime"],
+      "@/*": ["./*"]
+    }
+  }
+}

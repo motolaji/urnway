@@ -8,6 +8,8 @@ import type {
   FlightBookingOffer,
   GeneratedTripItineraryDraft,
   HotelBookingOffer,
+  LocationSuggestion,
+  LocationSuggestionScope,
   PaymentLink,
   PaymentLinkPreflight,
   PaymentQrRequest,
@@ -20,6 +22,9 @@ import type {
 import { getApiBaseUrl } from "@/lib/mobile-config";
 
 const SESSION_STORAGE_KEY = "urnway.session";
+const BOARDING_PASSES_CACHE_KEY = "urnway.boarding-passes";
+const BOARDING_PASS_CACHE_PREFIX = "urnway.boarding-pass";
+const BOARDING_PASS_CACHE_LIMIT = 8;
 
 export type {
   BoardingPass,
@@ -28,6 +33,8 @@ export type {
   FlightBookingOffer,
   GeneratedTripItineraryDraft,
   HotelBookingOffer,
+  LocationSuggestion,
+  LocationSuggestionScope,
   PaymentLink,
   PaymentLinkPreflight,
   PaymentQrRequest,
@@ -42,6 +49,8 @@ export type SessionTokens = {
   accessToken: string;
   refreshToken: string;
 };
+
+export type CachedResourceSource = "network" | "cache";
 
 export type WalletBalanceResponse = {
   summary: {
@@ -146,6 +155,14 @@ type HotelSearchOffersResponse = {
   offers: HotelBookingOffer[];
 };
 
+type LocationSuggestionsResponse = {
+  query: {
+    q: string;
+    scope: LocationSuggestionScope;
+  };
+  suggestions: LocationSuggestion[];
+};
+
 type BookingsResponse = {
   summary: {
     bookingCount: number;
@@ -172,6 +189,23 @@ type BoardingPassesResponse = {
 
 type BoardingPassResponse = {
   boardingPass: BoardingPass | null;
+};
+
+type CachedEnvelope<T> = {
+  value: T;
+  cachedAt: string;
+};
+
+export type CachedBoardingPassesResult = {
+  boardingPasses: BoardingPass[];
+  source: CachedResourceSource;
+  cachedAt: string | null;
+};
+
+export type CachedBoardingPassResult = {
+  boardingPass: BoardingPass | null;
+  source: CachedResourceSource;
+  cachedAt: string | null;
 };
 
 type PaymentsOverviewResponse = {
@@ -539,6 +573,11 @@ export function createFlightBooking(
   input: {
     offer: FlightBookingOffer;
     passengerName: string;
+    bornOn?: string;
+    email?: string;
+    phoneNumber?: string;
+    title?: "mr" | "mrs" | "ms" | "miss" | "mx" | "dr";
+    gender?: "m" | "f" | "x";
     tripId?: string;
     note?: string;
   },
@@ -572,6 +611,9 @@ export function createHotelBooking(
   input: {
     offer: HotelBookingOffer;
     guestName: string;
+    bornOn?: string;
+    email?: string;
+    phoneNumber?: string;
     tripId?: string;
     note?: string;
   },
@@ -582,6 +624,23 @@ export function createHotelBooking(
     body: input,
     accessToken,
   }).then((data) => data.booking);
+}
+
+export function fetchLocationSuggestions(
+  input: {
+    q: string;
+    scope: LocationSuggestionScope;
+  },
+  accessToken: string
+) {
+  const params = new URLSearchParams({
+    q: input.q,
+    scope: input.scope,
+  });
+
+  return apiRequest<LocationSuggestionsResponse>(`/v1/places/autocomplete?${params.toString()}`, {
+    accessToken,
+  }).then((data) => data.suggestions);
 }
 
 export function fetchBookings(accessToken: string) {
@@ -631,6 +690,134 @@ export function fetchBoardingPass(id: string, accessToken: string) {
   return apiRequest<BoardingPassResponse>(`/v1/boarding-passes/${id}`, {
     accessToken,
   }).then((data) => data.boardingPass);
+}
+
+function createBoardingPassCacheKey(id: string) {
+  return `${BOARDING_PASS_CACHE_PREFIX}.${id}`;
+}
+
+async function storeCachedValue<T>(key: string, value: T) {
+  const payload: CachedEnvelope<T> = {
+    value,
+    cachedAt: new Date().toISOString(),
+  };
+
+  await SecureStore.setItemAsync(key, JSON.stringify(payload));
+  return payload;
+}
+
+async function readCachedValue<T>(key: string) {
+  const stored = await SecureStore.getItemAsync(key);
+
+  if (!stored) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(stored) as Partial<CachedEnvelope<T>>;
+
+    if (!parsed || parsed.value === undefined || typeof parsed.cachedAt !== "string") {
+      return null;
+    }
+
+    return {
+      value: parsed.value,
+      cachedAt: parsed.cachedAt,
+    } satisfies CachedEnvelope<T>;
+  } catch {
+    return null;
+  }
+}
+
+async function persistBoardingPass(boardingPass: BoardingPass) {
+  return storeCachedValue(
+    createBoardingPassCacheKey(boardingPass.id),
+    boardingPass
+  );
+}
+
+async function persistBoardingPassCollection(boardingPasses: BoardingPass[]) {
+  const trimmed = boardingPasses.slice(0, BOARDING_PASS_CACHE_LIMIT);
+
+  const [collectionCache] = await Promise.all([
+    storeCachedValue(BOARDING_PASSES_CACHE_KEY, trimmed),
+    ...trimmed.map((boardingPass) => persistBoardingPass(boardingPass)),
+  ]);
+
+  return collectionCache;
+}
+
+export async function fetchBoardingPassesWithCache(
+  accessToken: string
+): Promise<CachedBoardingPassesResult> {
+  try {
+    const boardingPasses = await fetchBoardingPasses(accessToken);
+    const cached = await persistBoardingPassCollection(boardingPasses);
+
+    return {
+      boardingPasses,
+      source: "network",
+      cachedAt: cached.cachedAt,
+    };
+  } catch (error) {
+    const cached = await readCachedValue<BoardingPass[]>(BOARDING_PASSES_CACHE_KEY);
+
+    if (cached) {
+      return {
+        boardingPasses: cached.value,
+        source: "cache",
+        cachedAt: cached.cachedAt,
+      };
+    }
+
+    throw error;
+  }
+}
+
+export async function fetchBoardingPassWithCache(
+  id: string,
+  accessToken: string
+): Promise<CachedBoardingPassResult> {
+  try {
+    const boardingPass = await fetchBoardingPass(id, accessToken);
+
+    if (boardingPass) {
+      const cached = await persistBoardingPass(boardingPass);
+
+      return {
+        boardingPass,
+        source: "network",
+        cachedAt: cached.cachedAt,
+      };
+    }
+
+    return {
+      boardingPass: null,
+      source: "network",
+      cachedAt: null,
+    };
+  } catch (error) {
+    const [cachedPass, cachedCollection] = await Promise.all([
+      readCachedValue<BoardingPass>(createBoardingPassCacheKey(id)),
+      readCachedValue<BoardingPass[]>(BOARDING_PASSES_CACHE_KEY),
+    ]);
+
+    const fallbackPass =
+      cachedPass?.value ??
+      cachedCollection?.value.find((boardingPass) => boardingPass.id === id) ??
+      null;
+    const cachedAt = cachedPass?.cachedAt ?? cachedCollection?.cachedAt ?? null;
+
+    if (fallbackPass) {
+      return {
+        boardingPass: fallbackPass,
+        source: "cache",
+        cachedAt,
+      };
+    }
+
+    throw error;
+  }
 }
 
 export function updateTripExpense(
