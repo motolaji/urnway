@@ -58,11 +58,26 @@ function getErrorMessage(error: unknown) {
 }
 
 function normalizeSignature(result: unknown) {
-  if (typeof result === 'string' && result.startsWith('0x')) {
-    return result;
+  if (typeof result !== 'string') {
+    throw new Error('The connected wallet returned an invalid signature response.');
   }
 
-  throw new Error('The connected wallet returned an invalid signature response.');
+  const signature = result.startsWith('0x') ? result : `0x${result}`;
+
+  // A valid ECDSA signature should be 65 bytes (130 hex chars + 0x prefix = 132 chars)
+  // Some wallets may return 64 bytes (128 hex chars) without recovery id
+  if (signature.length < 130 || signature.length > 134) {
+    throw new Error(
+      `Invalid signature length: expected 130-134 characters, got ${signature.length}.`
+    );
+  }
+
+  // Validate it's a valid hex string
+  if (!/^0x[0-9a-fA-F]+$/.test(signature)) {
+    throw new Error('The signature contains invalid characters.');
+  }
+
+  return signature;
 }
 
 async function signAuthMessage(
@@ -128,6 +143,20 @@ async function fetchNonce(apiBaseUrl: string, walletAddress: string) {
   }
 
   return body.data;
+}
+
+function isNonceExpired(expiresAt: string | undefined): boolean {
+  if (!expiresAt) {
+    return false; // No expiration means it's valid
+  }
+
+  try {
+    const expirationTime = new Date(expiresAt).getTime();
+    // Add 5 second buffer to account for network latency
+    return Date.now() > expirationTime - 5000;
+  } catch {
+    return false;
+  }
 }
 
 export default function AuthScreen() {
@@ -205,6 +234,8 @@ export default function AuthScreen() {
           return;
         }
 
+        // Reset flag on error to allow manual retry via the Continue button
+        autoSwitchAttemptedRef.current = false;
         setStage('idle');
         setErrorMessage(
           error instanceof Error
@@ -246,8 +277,23 @@ export default function AuthScreen() {
       const nonce = await fetchNonce(config.apiBaseUrl, address);
       setNonceMessage(nonce.message);
 
+      // Validate nonce hasn't expired before signing
+      if (isNonceExpired(nonce.expiresAt)) {
+        throw new Error('The sign-in request has expired. Please try again.');
+      }
+
       setStage('signing');
-      const signature = await signAuthMessage(connector, nonce.walletAddress, nonce.message);
+
+      // Add timeout for signature request (3 minutes max)
+      const SIGNATURE_TIMEOUT_MS = 180000;
+      const signaturePromise = signAuthMessage(connector, nonce.walletAddress, nonce.message);
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          reject(new Error('Signature request timed out. Please try again.'));
+        }, SIGNATURE_TIMEOUT_MS);
+      });
+
+      const signature = await Promise.race([signaturePromise, timeoutPromise]);
 
       const payload = {
         walletAddress: nonce.walletAddress,

@@ -43,15 +43,28 @@ async function handle(request: NextRequest, context: { params: Promise<{ path: s
     });
 
     const headers = new Headers();
-    const contentType = request.headers.get('content-type');
-    const accept = request.headers.get('accept');
 
-    if (contentType) {
-      headers.set('content-type', contentType);
+    // Forward essential headers for authentication and content handling
+    const headersToForward = [
+      'content-type',
+      'accept',
+      'authorization',
+      'cookie',
+      'x-request-id',
+      'x-correlation-id',
+    ];
+
+    for (const headerName of headersToForward) {
+      const value = request.headers.get(headerName);
+      if (value) {
+        headers.set(headerName, value);
+      }
     }
 
-    if (accept) {
-      headers.set('accept', accept);
+    // Forward X-Forwarded headers for proper client identification
+    const clientIp = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip');
+    if (clientIp) {
+      headers.set('x-forwarded-for', clientIp);
     }
 
     const hasBody = !['GET', 'HEAD'].includes(request.method);

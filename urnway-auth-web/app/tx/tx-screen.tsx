@@ -3,7 +3,7 @@
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { useSearchParams } from 'next/navigation';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { isAddress } from 'viem';
+import { getAddress, isAddress } from 'viem';
 import {
   useAccount,
   useDisconnect,
@@ -104,11 +104,29 @@ function readTransactionRuntimeConfig(
       throw new Error('expected_sender must be a valid address.');
     }
 
+    // Normalize addresses to checksum format for consistent comparison
+    let checksumTo: `0x${string}`;
+    let checksumExpectedSender: `0x${string}` | null = null;
+
+    try {
+      checksumTo = getAddress(to);
+    } catch {
+      throw new Error('to address has an invalid checksum.');
+    }
+
+    if (expectedSender) {
+      try {
+        checksumExpectedSender = getAddress(expectedSender);
+      } catch {
+        throw new Error('expected_sender address has an invalid checksum.');
+      }
+    }
+
     return {
       ok: true,
       redirectUri,
       request: {
-        to,
+        to: checksumTo,
         data: data as `0x${string}`,
         value: BigInt(value),
         chainId,
@@ -118,7 +136,7 @@ function readTransactionRuntimeConfig(
       slug: searchParams.get('slug'),
       amount: searchParams.get('amount'),
       recipientName: searchParams.get('recipient_name'),
-      expectedSender: expectedSender as `0x${string}` | null,
+      expectedSender: checksumExpectedSender,
     };
   } catch (error) {
     return {
@@ -164,6 +182,7 @@ export default function TxScreen() {
 
     if (chainId === config.request.chainId) {
       autoSwitchAttemptedRef.current = false;
+      setStage((prev) => (prev === 'switching_chain' ? 'idle' : prev));
       return;
     }
 
@@ -174,14 +193,26 @@ export default function TxScreen() {
     autoSwitchAttemptedRef.current = true;
     let active = true;
 
+    const CHAIN_SWITCH_TIMEOUT_MS = 60000; // 60 second timeout for chain switch
+
     void (async () => {
       try {
         setErrorMessage(null);
         setStage('switching_chain');
-        await switchToChainWithFallback(switchChainAsync, {
+
+        // Add timeout for chain switching
+        const switchPromise = switchToChainWithFallback(switchChainAsync, {
           ...mezoTestnet,
           id: config.request.chainId,
         }, connector);
+
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(() => {
+            reject(new Error('Network switch timed out. Please try manually or check your wallet.'));
+          }, CHAIN_SWITCH_TIMEOUT_MS);
+        });
+
+        await Promise.race([switchPromise, timeoutPromise]);
 
         if (active) {
           setStage('idle');
@@ -191,6 +222,8 @@ export default function TxScreen() {
           return;
         }
 
+        // Reset flag on error to allow manual retry
+        autoSwitchAttemptedRef.current = false;
         setStage('idle');
         setErrorMessage(
           error instanceof Error
@@ -203,7 +236,7 @@ export default function TxScreen() {
     return () => {
       active = false;
     };
-  }, [address, chainId, config, isConnected, switchChainAsync]);
+  }, [address, chainId, config, connector, isConnected, switchChainAsync]);
 
   async function handleSubmit() {
     if (!config.ok) {
@@ -230,10 +263,20 @@ export default function TxScreen() {
 
       if (chainId !== config.request.chainId && switchChainAsync) {
         setStage('switching_chain');
-        await switchToChainWithFallback(switchChainAsync, {
+
+        const CHAIN_SWITCH_TIMEOUT_MS = 60000;
+        const switchPromise = switchToChainWithFallback(switchChainAsync, {
           ...mezoTestnet,
           id: config.request.chainId,
         }, connector);
+
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(() => {
+            reject(new Error('Network switch timed out. Please try manually.'));
+          }, CHAIN_SWITCH_TIMEOUT_MS);
+        });
+
+        await Promise.race([switchPromise, timeoutPromise]);
       }
 
       setStage('submitting');

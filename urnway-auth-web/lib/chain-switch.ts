@@ -55,6 +55,18 @@ function isUnknownChainError(error: unknown) {
   );
 }
 
+function isUserRejectionError(error: unknown) {
+  const code = getErrorCode(error);
+  const message = getErrorMessage(error).toLowerCase();
+
+  return (
+    code === 4001 ||
+    message.includes('user rejected') ||
+    message.includes('user denied') ||
+    message.includes('rejected the request')
+  );
+}
+
 async function getConnectorProvider(connector: ConnectorLike, chainId: number) {
   if (!connector || typeof connector.getProvider !== 'function') {
     return null;
@@ -84,17 +96,24 @@ export async function switchToChainWithFallback(
   chain: Chain,
   connector?: ConnectorLike
 ) {
+  // First try using Wagmi's switchChainAsync
   if (switchChainAsync) {
     try {
       await switchChainAsync({ chainId: chain.id });
       return;
     } catch (error) {
+      // If user rejected, throw immediately with clear message
+      if (isUserRejectionError(error)) {
+        throw new Error('Network switch was rejected. Please approve the switch in your wallet.');
+      }
+      // Only continue to fallback if chain not configured
       if (!isChainNotConfiguredError(error)) {
         throw error;
       }
     }
   }
 
+  // Fallback: try direct provider calls
   const provider =
     (await getConnectorProvider(connector, chain.id)) ?? getInjectedProvider();
 
@@ -102,37 +121,58 @@ export async function switchToChainWithFallback(
     throw new Error('Could not access the connected wallet provider to switch to Mezo.');
   }
 
-  const chainId = `0x${chain.id.toString(16)}`;
+  const chainIdHex = `0x${chain.id.toString(16)}`;
 
   try {
     await provider.request({
       method: 'wallet_switchEthereumChain',
-      params: [{ chainId }],
+      params: [{ chainId: chainIdHex }],
     });
     return;
   } catch (error) {
+    // If user rejected, throw immediately
+    if (isUserRejectionError(error)) {
+      throw new Error('Network switch was rejected. Please approve the switch in your wallet.');
+    }
+    // Only try to add chain if it's unknown
     if (!isUnknownChainError(error)) {
       throw error;
     }
   }
 
+  // Chain not found, try to add it first
   const explorerUrl = chain.blockExplorers?.default?.url;
 
-  await provider.request({
-    method: 'wallet_addEthereumChain',
-    params: [
-      {
-        chainId,
-        chainName: chain.name,
-        nativeCurrency: chain.nativeCurrency,
-        rpcUrls: chain.rpcUrls.default.http,
-        ...(explorerUrl ? { blockExplorerUrls: [explorerUrl] } : {}),
-      },
-    ],
-  });
+  try {
+    await provider.request({
+      method: 'wallet_addEthereumChain',
+      params: [
+        {
+          chainId: chainIdHex,
+          chainName: chain.name,
+          nativeCurrency: chain.nativeCurrency,
+          rpcUrls: chain.rpcUrls.default.http,
+          ...(explorerUrl ? { blockExplorerUrls: [explorerUrl] } : {}),
+        },
+      ],
+    });
+  } catch (error) {
+    if (isUserRejectionError(error)) {
+      throw new Error('Adding the Mezo network was rejected. Please approve to continue.');
+    }
+    throw error;
+  }
 
-  await provider.request({
-    method: 'wallet_switchEthereumChain',
-    params: [{ chainId }],
-  });
+  // After adding, switch to it
+  try {
+    await provider.request({
+      method: 'wallet_switchEthereumChain',
+      params: [{ chainId: chainIdHex }],
+    });
+  } catch (error) {
+    if (isUserRejectionError(error)) {
+      throw new Error('Network switch was rejected after adding. Please try again.');
+    }
+    throw error;
+  }
 }

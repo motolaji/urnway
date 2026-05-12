@@ -66,16 +66,37 @@ export function readPassportRuntimeConfig(): PassportRuntimeConfig {
     };
   }
 
+  // Get the mobile redirect URI for wallet callbacks
+  const mobileRedirectUri = process.env.NEXT_PUBLIC_MOBILE_REDIRECT_URI?.trim();
+
   return {
     ok: true,
     wagmiConfig: getDefaultConfig({
-      appName: 'Urnway Auth',
+      appName: 'Urnway',
+      appDescription: 'Urnway Wallet Authentication',
+      appUrl: typeof window !== 'undefined' ? window.location.origin : 'https://urnway.com',
+      appIcon: 'https://urnway.com/icon.png',
       projectId: walletConnectProjectId,
       chains: [mezoTestnet],
       wallets: walletList,
       transports: {
         [mezoTestnet.id]: http(mezoTestnet.rpcUrls.default.http[0]),
       },
+      // WalletConnect metadata for redirect handling
+      ...(mobileRedirectUri && {
+        walletConnectParameters: {
+          metadata: {
+            name: 'Urnway',
+            description: 'Urnway Wallet Authentication',
+            url: typeof window !== 'undefined' ? window.location.origin : 'https://urnway.com',
+            icons: ['https://urnway.com/icon.png'],
+            redirect: {
+              native: mobileRedirectUri,
+              universal: typeof window !== 'undefined' ? window.location.href : undefined,
+            },
+          },
+        },
+      }),
     }),
     queryClient: passportQueryClient,
   };
