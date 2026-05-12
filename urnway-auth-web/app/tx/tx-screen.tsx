@@ -19,6 +19,7 @@ import { resetWalletBridgeSession } from '@/lib/wallet-session';
 type FlowStage =
   | 'idle'
   | 'switching_chain'
+  | 'awaiting_wallet'
   | 'submitting'
   | 'submitted'
   | 'error';
@@ -75,6 +76,35 @@ function getErrorMessage(error: unknown) {
   }
 
   return 'The transaction flow failed unexpectedly.';
+}
+
+function isUserRejectionError(error: unknown) {
+  if (error instanceof Error) {
+    const message = error.message.toLowerCase();
+    return (
+      message.includes('user rejected') ||
+      message.includes('user denied') ||
+      message.includes('rejected the request') ||
+      message.includes('rejected by user')
+    );
+  }
+
+  if (typeof error === 'object' && error && 'code' in error) {
+    return (error as { code?: number }).code === 4001;
+  }
+
+  return false;
+}
+
+function isMobileWalletConnector(connectorName: string | undefined) {
+  if (!connectorName) return false;
+  const name = connectorName.toLowerCase();
+  return (
+    name.includes('walletconnect') ||
+    name.includes('trust') ||
+    name.includes('metamask') ||
+    name.includes('coinbase')
+  );
 }
 
 function readTransactionRuntimeConfig(
@@ -172,6 +202,7 @@ export default function TxScreen() {
     senderMatches &&
     chainId === config.request.chainId &&
     stage !== 'switching_chain' &&
+    stage !== 'awaiting_wallet' &&
     stage !== 'submitting';
 
   useEffect(() => {
@@ -279,9 +310,13 @@ export default function TxScreen() {
         await Promise.race([switchPromise, timeoutPromise]);
       }
 
-      setStage('submitting');
+      // Show "awaiting wallet" state to prompt user to check their wallet
+      setStage('awaiting_wallet');
 
-      const hash = await sendTransactionAsync({
+      // Transaction timeout (3 minutes - user needs time to open wallet and confirm)
+      const TX_TIMEOUT_MS = 180000;
+
+      const txPromise = sendTransactionAsync({
         to: config.request.to,
         data: config.request.data,
         value: config.request.value,
@@ -289,6 +324,17 @@ export default function TxScreen() {
         gas: config.request.gas,
         gasPrice: config.request.gasPrice,
       });
+
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          reject(new Error('Transaction timed out. Please check your wallet and try again.'));
+        }, TX_TIMEOUT_MS);
+      });
+
+      // Update to submitting once we know the request was sent
+      setStage('submitting');
+
+      const hash = await Promise.race([txPromise, timeoutPromise]);
 
       const callbackUrl = buildTransactionDeepLink(config.redirectUri, {
         status: 'submitted',
@@ -307,6 +353,13 @@ export default function TxScreen() {
         }, 900);
       }
     } catch (error) {
+      // Handle user rejection gracefully
+      if (isUserRejectionError(error)) {
+        setStage('idle');
+        setErrorMessage('Transaction was rejected. You can try again when ready.');
+        return;
+      }
+
       setStage('error');
       setErrorMessage(getErrorMessage(error));
     }
@@ -386,15 +439,25 @@ export default function TxScreen() {
           >
             {stage === 'switching_chain'
               ? 'Switching to Mezo...'
-              : stage === 'submitting'
-                ? 'Waiting for approval...'
-                : 'Approve transfer'}
+              : stage === 'awaiting_wallet'
+                ? 'Open your wallet...'
+                : stage === 'submitting'
+                  ? 'Confirming in wallet...'
+                  : 'Approve transfer'}
           </button>
         </div>
 
         {!senderMatches ? (
           <p className="error-text">
             The connected wallet does not match the wallet used during preflight.
+          </p>
+        ) : null}
+
+        {(stage === 'awaiting_wallet' || stage === 'submitting') ? (
+          <p className="muted bridge-muted">
+            {isMobileWalletConnector(connector?.name)
+              ? 'Please open your wallet app to approve the transaction.'
+              : 'Please confirm the transaction in your wallet popup.'}
           </p>
         ) : null}
 
