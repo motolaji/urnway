@@ -2,9 +2,9 @@
 
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { useSearchParams } from 'next/navigation';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { stringToHex } from 'viem';
-import { useAccount, useChainId, useDisconnect } from 'wagmi';
+import { useAccount, useChainId, useDisconnect, useSwitchChain } from 'wagmi';
 
 import {
   buildBridgeEnvelope,
@@ -12,12 +12,14 @@ import {
   postToReactNativeWebView,
   type AuthPayload,
 } from '@/lib/auth-bridge';
+import { switchToChainWithFallback } from '@/lib/chain-switch';
 import { buildApiUrl, readClientConfig } from '@/lib/config';
 import { mezoTestnet } from '@/lib/passport';
 import { resetWalletBridgeSession } from '@/lib/wallet-session';
 
 type FlowStage =
   | 'idle'
+  | 'switching_chain'
   | 'requesting_nonce'
   | 'signing'
   | 'handing_off'
@@ -147,6 +149,8 @@ export default function AuthScreen() {
   const { address, connector, isConnected } = useAccount();
   const chainId = useChainId();
   const { disconnect } = useDisconnect();
+  const { switchChainAsync } = useSwitchChain();
+  const autoSwitchAttemptedRef = useRef(false);
 
   const [stage, setStage] = useState<FlowStage>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -163,9 +167,57 @@ export default function AuthScreen() {
     config.ok &&
     isConnected &&
     Boolean(address) &&
+    onRequiredChain &&
+    stage !== 'switching_chain' &&
     stage !== 'requesting_nonce' &&
     stage !== 'signing' &&
     stage !== 'handing_off';
+
+  useEffect(() => {
+    if (!config.ok || !isConnected || !address) {
+      autoSwitchAttemptedRef.current = false;
+      return;
+    }
+
+    if (onRequiredChain) {
+      autoSwitchAttemptedRef.current = false;
+      return;
+    }
+
+    if (autoSwitchAttemptedRef.current) {
+      return;
+    }
+
+    autoSwitchAttemptedRef.current = true;
+    let active = true;
+
+    void (async () => {
+      try {
+        setErrorMessage(null);
+        setStage('switching_chain');
+        await switchToChainWithFallback(switchChainAsync, mezoTestnet, connector);
+
+        if (active) {
+          setStage('idle');
+        }
+      } catch (error) {
+        if (!active) {
+          return;
+        }
+
+        setStage('idle');
+        setErrorMessage(
+          error instanceof Error
+            ? error.message
+            : 'Could not switch to Mezo testnet automatically.'
+        );
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [address, config.ok, connector, isConnected, onRequiredChain, switchChainAsync]);
 
   async function handleStartAuth() {
     if (!config.ok) {
@@ -184,6 +236,11 @@ export default function AuthScreen() {
       setErrorMessage(null);
       setDeepLinkUrl(null);
       setUsedWebViewBridge(false);
+
+      if (!onRequiredChain) {
+        setStage('switching_chain');
+        await switchToChainWithFallback(switchChainAsync, mezoTestnet, connector);
+      }
 
       setStage('requesting_nonce');
       const nonce = await fetchNonce(config.apiBaseUrl, address);
@@ -249,8 +306,8 @@ export default function AuthScreen() {
 
         <h1 className="bridge-title">Sign in with Mezo Passport</h1>
         <p className="bridge-copy">
-          Connect the wallet you want to use in Urnway and approve the ownership signature.
-          Mezo network enforcement happens on transaction flows, not on sign-in.
+          Connect the wallet you want to use in Urnway. Urnway will switch the wallet to Mezo
+          testnet automatically before asking for the ownership signature.
         </p>
 
         <div className="bridge-summary">
@@ -260,7 +317,13 @@ export default function AuthScreen() {
           </div>
           <div className="bridge-summary-row">
             <span>Network</span>
-            <strong>{onRequiredChain ? 'Mezo testnet' : 'Any connected network'}</strong>
+            <strong>
+              {stage === 'switching_chain'
+                ? 'Switching to Mezo testnet...'
+                : onRequiredChain
+                  ? 'Mezo testnet'
+                  : 'Wrong network'}
+            </strong>
           </div>
         </div>
 
@@ -290,6 +353,8 @@ export default function AuthScreen() {
             >
               {stage === 'requesting_nonce'
                 ? 'Preparing sign-in...'
+                : stage === 'switching_chain'
+                  ? 'Switching to Mezo...'
                 : stage === 'signing'
                   ? 'Waiting for signature...'
                   : stage === 'handing_off'
@@ -313,6 +378,9 @@ export default function AuthScreen() {
         {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
 
         {!config.ok ? <p className="muted bridge-muted">{config.error}</p> : null}
+        {stage === 'switching_chain' ? (
+          <p className="muted bridge-muted">Approve the Mezo testnet switch in your wallet.</p>
+        ) : null}
         {nonceMessage && stage === 'signing' ? (
           <p className="muted bridge-muted">Passport is waiting for your signature.</p>
         ) : null}

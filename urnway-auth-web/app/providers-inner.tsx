@@ -6,7 +6,7 @@ import '@rainbow-me/rainbowkit/styles.css';
 import { useMemo, useState, type ReactNode } from 'react';
 import { WagmiProvider } from 'wagmi';
 
-import { readPassportRuntimeConfig } from '@/lib/passport';
+import { mezoTestnet, readPassportRuntimeConfig } from '@/lib/passport';
 
 type ProvidersInnerProps = {
   children: ReactNode;
@@ -40,7 +40,7 @@ export function ProvidersInner({ children }: ProvidersInnerProps) {
   return (
     <WagmiProvider config={runtimeConfig.wagmiConfig}>
       <QueryClientProvider client={queryClient}>
-        <RainbowKitProvider>{children}</RainbowKitProvider>
+        <RainbowKitProvider initialChain={mezoTestnet}>{children}</RainbowKitProvider>
       </QueryClientProvider>
     </WagmiProvider>
   );
