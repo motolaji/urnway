@@ -13,7 +13,11 @@ import {
 
 import { switchToChainWithFallback } from '@/lib/chain-switch';
 import { mezoTestnet } from '@/lib/passport';
-import { buildTransactionDeepLink } from '@/lib/tx-bridge';
+import {
+  buildTransactionDeepLink,
+  buildTransactionBridgeEnvelope,
+  postTransactionToReactNativeWebView,
+} from '@/lib/tx-bridge';
 import { resetWalletBridgeSession } from '@/lib/wallet-session';
 
 type FlowStage =
@@ -189,6 +193,10 @@ export default function TxScreen() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [txHash, setTxHash] = useState<string | null>(null);
   const [deepLinkUrl, setDeepLinkUrl] = useState<string | null>(null);
+  const [usedWebViewBridge, setUsedWebViewBridge] = useState(false);
+
+  const bridgeAvailable =
+    typeof window !== 'undefined' && Boolean(window.ReactNativeWebView?.postMessage);
 
   const senderMatches =
     config.ok && config.expectedSender && address
@@ -336,18 +344,29 @@ export default function TxScreen() {
 
       const hash = await Promise.race([txPromise, timeoutPromise]);
 
-      const callbackUrl = buildTransactionDeepLink(config.redirectUri, {
-        status: 'submitted',
+      // Build the result payload
+      const resultPayload = {
+        status: 'submitted' as const,
         txHash: hash,
-        slug: config.slug,
+        slug: config.slug ?? undefined,
+        source: 'urnway-auth-web',
         message: 'Transaction submitted from Passport wallet flow.',
-      });
+      };
+
+      // Try WebView bridge first (for React Native in-app browser)
+      const envelope = buildTransactionBridgeEnvelope(resultPayload);
+      const postedToWebView = postTransactionToReactNativeWebView(envelope);
+
+      // Build deep link as fallback
+      const callbackUrl = buildTransactionDeepLink(config.redirectUri, resultPayload);
 
       setTxHash(hash);
       setDeepLinkUrl(callbackUrl);
+      setUsedWebViewBridge(postedToWebView);
       setStage('submitted');
 
-      if (callbackUrl) {
+      // Only redirect via deep link if WebView bridge wasn't available
+      if (!postedToWebView && callbackUrl) {
         window.setTimeout(() => {
           window.location.assign(callbackUrl);
         }, 900);
@@ -371,6 +390,7 @@ export default function TxScreen() {
     setErrorMessage(null);
     setTxHash(null);
     setDeepLinkUrl(null);
+    setUsedWebViewBridge(false);
     disconnect();
   }
 
@@ -462,10 +482,14 @@ export default function TxScreen() {
         ) : null}
 
         {stage === 'submitted' ? (
-          <p className="success-text">Transfer submitted. Returning to Urnway now.</p>
+          <p className="success-text">
+            {usedWebViewBridge
+              ? 'Transfer submitted. Result sent to Urnway.'
+              : 'Transfer submitted. Returning to Urnway now.'}
+          </p>
         ) : null}
 
-        {deepLinkUrl ? (
+        {deepLinkUrl && !usedWebViewBridge ? (
           <a className="link-button" href={deepLinkUrl}>
             Return to app
           </a>

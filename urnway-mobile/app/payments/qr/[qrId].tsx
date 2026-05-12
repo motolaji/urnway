@@ -1,13 +1,20 @@
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Linking,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from "react-native";
 import * as WebBrowser from "expo-web-browser";
+import { WebView } from "react-native-webview";
+import type {
+  ShouldStartLoadRequest,
+  WebViewMessageEvent,
+} from "react-native-webview/lib/WebViewTypes";
 
 import BlurScrollScreen from "@/components/blur-scroll-screen";
 import {
@@ -22,7 +29,10 @@ import {
   type PaymentLinkPreflight,
   type PaymentQrRequest,
 } from "@/lib/session";
-import { parseTransactionCallbackUrl } from "@/lib/tx-contract";
+import {
+  parseTransactionCallbackUrl,
+  parseTransactionBridgeMessage,
+} from "@/lib/tx-contract";
 import { useSession } from "@/providers/session-provider";
 
 function formatTimestamp(value: string) {
@@ -52,6 +62,22 @@ export default function PaymentQrRouteScreen() {
   const [isLaunchingWallet, setIsLaunchingWallet] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [transactionMessage, setTransactionMessage] = useState<string | null>(null);
+
+  // WebView state for Android in-app transaction flow
+  const [showTxWebView, setShowTxWebView] = useState(false);
+  const [transactionWebUrl, setTransactionWebUrl] = useState<string | null>(null);
+  const txHandledRef = useRef(false);
+  const isAndroid = Platform.OS === "android";
+  const redirectUri = getMobileTransactionRedirectUri();
+  const transactionWebOrigin = transactionWebUrl
+    ? (() => {
+        try {
+          return new URL(transactionWebUrl).origin;
+        } catch {
+          return null;
+        }
+      })()
+    : null;
 
   useEffect(() => {
     let active = true;
@@ -194,52 +220,39 @@ export default function PaymentQrRouteScreen() {
     clearError();
     setErrorMessage(null);
     setTransactionMessage(null);
+    txHandledRef.current = false;
+
+    const transactionUrl = buildAuthWebTransactionUrl({
+      to: preflight.transactionRequest.to,
+      data: preflight.transactionRequest.data,
+      value: preflight.transactionRequest.value,
+      chainId: preflight.transactionRequest.chainId,
+      gasLimit: preflight.transactionRequest.gasLimit,
+      gasPrice: preflight.transactionRequest.gasPrice,
+      slug: qrRequest.paymentLink.slug,
+      amount: qrRequest.paymentLink.amount,
+      recipientName: qrRequest.paymentLink.recipient.displayName,
+      expectedSender: preflight.senderWalletAddress,
+    });
+
+    // Android: use in-app WebView for reliable postMessage communication
+    if (isAndroid) {
+      setTransactionWebUrl(transactionUrl);
+      setShowTxWebView(true);
+      return;
+    }
+
+    // iOS: use external browser with deep link callback
     setIsLaunchingWallet(true);
 
     try {
-      const transactionUrl = buildAuthWebTransactionUrl({
-        to: preflight.transactionRequest.to,
-        data: preflight.transactionRequest.data,
-        value: preflight.transactionRequest.value,
-        chainId: preflight.transactionRequest.chainId,
-        gasLimit: preflight.transactionRequest.gasLimit,
-        gasPrice: preflight.transactionRequest.gasPrice,
-        slug: qrRequest.paymentLink.slug,
-        amount: qrRequest.paymentLink.amount,
-        recipientName: qrRequest.paymentLink.recipient.displayName,
-        expectedSender: preflight.senderWalletAddress,
-      });
-
       const result = await WebBrowser.openAuthSessionAsync(
         transactionUrl,
         getMobileTransactionRedirectUri()
       );
 
       if (result.type === "success" && "url" in result && result.url) {
-        const callback = parseTransactionCallbackUrl(result.url);
-
-        if (callback.status === "submitted") {
-          const submittedLink = await submitPaymentLink(
-            callback.slug || qrRequest.paymentLink.slug,
-            {
-              txHash: callback.txHash,
-              senderWalletAddress: preflight.senderWalletAddress,
-            },
-            tokens.accessToken
-          );
-
-          setQrRequest({
-            ...qrRequest,
-            paymentLink: submittedLink,
-          });
-          setPreflight(null);
-          setTransactionMessage(
-            `Transaction submitted: ${callback.txHash.slice(0, 10)}... Waiting for confirmation.`
-          );
-          return;
-        }
-
-        setTransactionMessage(callback.message || "Transaction flow ended without submission.");
+        await handleTransactionCallback(result.url);
         return;
       }
 
@@ -258,6 +271,169 @@ export default function PaymentQrRouteScreen() {
     } finally {
       setIsLaunchingWallet(false);
     }
+  }
+
+  async function handleTransactionCallback(callbackUrl: string) {
+    if (txHandledRef.current) {
+      return;
+    }
+
+    if (!tokens?.accessToken || !qrRequest || !preflight) {
+      setErrorMessage("Session expired. Please run preflight again.");
+      return;
+    }
+
+    try {
+      const callback = parseTransactionCallbackUrl(callbackUrl);
+
+      if (callback.status === "submitted") {
+        txHandledRef.current = true;
+
+        const submittedLink = await submitPaymentLink(
+          callback.slug || qrRequest.paymentLink.slug,
+          {
+            txHash: callback.txHash,
+            senderWalletAddress: preflight.senderWalletAddress,
+          },
+          tokens.accessToken
+        );
+
+        setQrRequest({
+          ...qrRequest,
+          paymentLink: submittedLink,
+        });
+        setPreflight(null);
+        setShowTxWebView(false);
+        setTransactionWebUrl(null);
+        setTransactionMessage(
+          `Transaction submitted: ${callback.txHash.slice(0, 10)}... Waiting for confirmation.`
+        );
+        return;
+      }
+
+      setTransactionMessage(callback.message || "Transaction flow ended without submission.");
+    } catch (error) {
+      txHandledRef.current = false;
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Could not process the transaction callback."
+      );
+    }
+  }
+
+  async function handleWebViewMessage(event: WebViewMessageEvent) {
+    if (txHandledRef.current) {
+      return;
+    }
+
+    if (!tokens?.accessToken || !qrRequest || !preflight) {
+      setErrorMessage("Session expired. Please run preflight again.");
+      setShowTxWebView(false);
+      return;
+    }
+
+    try {
+      const payload = parseTransactionBridgeMessage(event.nativeEvent.data);
+
+      if (payload.status === "submitted" && payload.txHash) {
+        txHandledRef.current = true;
+
+        const submittedLink = await submitPaymentLink(
+          payload.slug || qrRequest.paymentLink.slug,
+          {
+            txHash: payload.txHash,
+            senderWalletAddress: preflight.senderWalletAddress,
+          },
+          tokens.accessToken
+        );
+
+        setQrRequest({
+          ...qrRequest,
+          paymentLink: submittedLink,
+        });
+        setPreflight(null);
+        setShowTxWebView(false);
+        setTransactionWebUrl(null);
+        setTransactionMessage(
+          `Transaction submitted: ${payload.txHash.slice(0, 10)}... Waiting for confirmation.`
+        );
+        return;
+      }
+
+      if (payload.status === "error" || payload.status === "cancelled") {
+        setTransactionMessage(payload.message || "Transaction was cancelled or failed.");
+        setShowTxWebView(false);
+        setTransactionWebUrl(null);
+      }
+    } catch (error) {
+      txHandledRef.current = false;
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Could not process the WebView message."
+      );
+      setShowTxWebView(false);
+    }
+  }
+
+  function shouldOpenExternally(url: string) {
+    if (!url) {
+      return false;
+    }
+
+    // Redirect URI should be intercepted
+    if (url.startsWith(redirectUri)) {
+      return true;
+    }
+
+    // Allow same-origin navigation
+    if (url.startsWith("http://") || url.startsWith("https://")) {
+      if (!transactionWebOrigin) {
+        return false;
+      }
+
+      try {
+        return new URL(url).origin !== transactionWebOrigin;
+      } catch {
+        return false;
+      }
+    }
+
+    // Non-http URLs (wallet deep links etc.) should open externally
+    return true;
+  }
+
+  function handleShouldStartLoad(request: ShouldStartLoadRequest) {
+    const nextUrl = request.url;
+
+    if (!showTxWebView) {
+      return true;
+    }
+
+    if (!shouldOpenExternally(nextUrl)) {
+      return true;
+    }
+
+    // Handle redirect URI callback
+    if (nextUrl.startsWith(redirectUri)) {
+      void handleTransactionCallback(nextUrl);
+      return false;
+    }
+
+    // Open wallet deep links externally
+    void Linking.openURL(nextUrl).catch(() => {
+      setErrorMessage(`Cannot open URL: ${nextUrl}`);
+    });
+
+    return false;
+  }
+
+  function resetTxWebView() {
+    txHandledRef.current = false;
+    setShowTxWebView(false);
+    setTransactionWebUrl(null);
+    setIsLaunchingWallet(false);
   }
 
   return (
@@ -386,15 +562,45 @@ export default function PaymentQrRouteScreen() {
 
           {!preflight.issues.some((issue) => issue.severity === "error") ? (
             <Pressable
-              disabled={isLaunchingWallet}
+              disabled={isLaunchingWallet || showTxWebView}
               onPress={() => void handleLaunchWallet()}
-              style={[styles.primaryButton, isLaunchingWallet && styles.disabledButton]}
+              style={[styles.primaryButton, (isLaunchingWallet || showTxWebView) && styles.disabledButton]}
             >
               <Text style={styles.primaryButtonText}>
-                {isLaunchingWallet ? "Opening wallet..." : "Continue in wallet"}
+                {isLaunchingWallet ? "Opening wallet..." : showTxWebView ? "WebView open..." : "Continue in wallet"}
               </Text>
             </Pressable>
           ) : null}
+        </View>
+      ) : null}
+
+      {showTxWebView && transactionWebUrl ? (
+        <View style={styles.webViewShell}>
+          <View style={styles.webViewHeader}>
+            <Text style={styles.sectionTitle}>Transaction</Text>
+            <Pressable onPress={resetTxWebView} style={styles.closeButton}>
+              <Text style={styles.closeButtonText}>Close</Text>
+            </Pressable>
+          </View>
+          <Text style={styles.caption}>
+            Connect your wallet and approve the transfer in the view below.
+          </Text>
+          <View style={styles.webViewCard}>
+            <WebView
+              source={{ uri: transactionWebUrl }}
+              originWhitelist={["*"]}
+              onMessage={(event) => {
+                void handleWebViewMessage(event);
+              }}
+              onShouldStartLoadWithRequest={handleShouldStartLoad}
+              setSupportMultipleWindows={false}
+              startInLoadingState
+              onError={(event) => {
+                setErrorMessage(event.nativeEvent.description);
+                resetTxWebView();
+              }}
+            />
+          </View>
         </View>
       ) : null}
 
@@ -490,5 +696,36 @@ const styles = StyleSheet.create({
   warningText: {
     color: "#8a5f12",
     lineHeight: 20,
+  },
+  webViewShell: {
+    width: "100%",
+    borderRadius: 28,
+    backgroundColor: "#fffaf3",
+    padding: 24,
+    gap: 14,
+    minHeight: 450,
+  },
+  webViewHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  webViewCard: {
+    flex: 1,
+    minHeight: 380,
+    overflow: "hidden",
+    borderRadius: 16,
+    backgroundColor: "#ffffff",
+  },
+  closeButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: "#e8e0d8",
+  },
+  closeButtonText: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#635448",
   },
 });

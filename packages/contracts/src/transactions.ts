@@ -8,6 +8,11 @@ export type TransactionCallbackPayload = {
   message?: string | null;
 };
 
+export type TransactionBridgeEnvelope = {
+  type: "urnway-transaction-result";
+  payload: TransactionCallbackPayload;
+};
+
 export type TransactionCallbackResult =
   | {
       status: "submitted";
@@ -130,4 +135,60 @@ export function parseTransactionCallbackParams(
   }
 
   return parseTransactionCallbackUrl(url.toString());
+}
+
+// WebView Bridge Functions (for React Native WebView communication)
+
+export function buildTransactionBridgeEnvelope(
+  payload: TransactionCallbackPayload
+): TransactionBridgeEnvelope {
+  return {
+    type: "urnway-transaction-result",
+    payload,
+  };
+}
+
+export function postTransactionToReactNativeWebView(
+  envelope: TransactionBridgeEnvelope
+): boolean {
+  const bridge = (globalThis as typeof globalThis & {
+    ReactNativeWebView?: {
+      postMessage(message: string): void;
+    };
+  }).ReactNativeWebView;
+
+  if (!bridge?.postMessage) {
+    return false;
+  }
+
+  bridge.postMessage(JSON.stringify(envelope));
+  return true;
+}
+
+export function parseTransactionBridgeMessage(
+  rawMessage: string
+): TransactionCallbackPayload {
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(rawMessage);
+  } catch {
+    throw new Error("Transaction bridge message is not valid JSON.");
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("Transaction bridge message must be an object.");
+  }
+
+  const envelope = parsed as Partial<TransactionBridgeEnvelope>;
+
+  if (envelope.type !== "urnway-transaction-result") {
+    throw new Error("Received an unknown transaction bridge message.");
+  }
+
+  if (!envelope.payload || typeof envelope.payload !== "object") {
+    throw new Error("Transaction bridge message payload is missing.");
+  }
+
+  return envelope.payload;
 }
