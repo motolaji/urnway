@@ -1,615 +1,685 @@
 import { Ionicons } from "@expo/vector-icons";
-import { type Href, useLocalSearchParams, useRouter } from "expo-router";
-import {
-  BleManager,
-  ScanMode,
-  State,
-  type Device,
-} from "react-native-ble-plx";
-import {
-  startAdvertising,
-  stopAdvertising,
-  setServices,
-} from "munim-bluetooth-peripheral";
-import { useEffect, useRef, useState } from "react";
-import {
-  PermissionsAndroid,
-  Platform,
-  Pressable,
-  StyleSheet,
-  Text,
-  View,
-} from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { router, type Href } from "expo-router";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Platform, StyleSheet, View } from "react-native";
+import { State } from "react-native-ble-plx";
 
+import BlurScrollScreen from "@/components/blur-scroll-screen";
+import { Button, Card, Input, Text, Toggle } from "@/components/ui";
+import { colors, spacing, typography } from "@/constants/design-tokens";
 import {
-  buildNearbyAdvertisedName,
-  NEARBY_PAYMENT_CHARACTERISTIC_UUID,
-  NEARBY_PAYMENT_SERVICE_UUID,
-  parseNearbyAdvertisedSlug,
+  getBluetoothStateErrorMessage,
+  getNearbyPermissionErrorMessage,
+  NearbyBluetoothService,
+  requestNearbyPermissions,
+} from "@/lib/nearby-bluetooth-service";
+import {
+  formatMinorCurrencyAmount,
+  parseMajorAmountToMinorUnits,
+  type IncomingNearbyPayment,
+  type NearbyDoneMessage,
+  type NearbyUser,
 } from "@/lib/nearby-payments";
-import { ApiError, fetchPublicPaymentLink, type PaymentLink } from "@/lib/session";
+import {
+  completeNearbyPaymentIntent,
+  createNearbyPaymentIntent,
+  fetchNearbyPaymentIntent,
+} from "@/lib/session";
+import { useSession } from "@/providers/session-provider";
 
-type NearbyRequest = {
-  deviceId: string;
-  slug: string;
-  name: string;
-  rssi: number | null;
-  lastSeenAt: number;
+type SenderFlowState = {
+  user: NearbyUser;
+  paymentIntentId: string;
+  amountMinor: number;
+  currency: string;
+  status: "connecting" | "awaiting_ack" | "acked" | "completed";
 };
 
-type NearbyPermissionMode = "scan" | "advertise";
+function formatNearbyListShortPublicId(publicUserId: string) {
+  const normalized = publicUserId.startsWith("pub_")
+    ? publicUserId.slice(4)
+    : publicUserId;
 
-function getNearbyPermissionErrorMessage(mode: NearbyPermissionMode) {
-  return mode === "advertise"
-    ? "Nearby sharing needs Bluetooth permissions to advertise."
-    : "Nearby discovery needs Bluetooth permissions to scan.";
-}
-
-function getBluetoothStateErrorMessage(state: State, mode: NearbyPermissionMode) {
-  if (state === State.Unauthorized) {
-    return getNearbyPermissionErrorMessage(mode);
-  }
-
-  if (state === State.Unsupported) {
-    return "This device does not support Bluetooth LE nearby payments.";
-  }
-
-  if (state === State.PoweredOff) {
-    return mode === "advertise"
-      ? "Turn Bluetooth on to share a nearby payment request."
-      : "Turn Bluetooth on to discover nearby payment requests.";
-  }
-
-  return null;
-}
-
-async function requestNearbyPermissions(mode: NearbyPermissionMode) {
-  if (Platform.OS !== "android") {
-    return true;
-  }
-
-  const version =
-    typeof Platform.Version === "number" ? Platform.Version : Number(Platform.Version);
-
-  if (version >= 31) {
-    const permissions =
-      mode === "advertise"
-        ? [
-            PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADVERTISE,
-            PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-          ]
-        : [
-            PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-            PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-          ];
-    const result = await PermissionsAndroid.requestMultiple(permissions);
-
-    return Object.values(result).every(
-      (value) => value === PermissionsAndroid.RESULTS.GRANTED
-    );
-  }
-
-  const result = await PermissionsAndroid.requestMultiple([
-    PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-    PermissionsAndroid.PERMISSIONS.ACCESS_COARSE_LOCATION,
-  ]);
-
-  return Object.values(result).every(
-    (value) => value === PermissionsAndroid.RESULTS.GRANTED
-  );
-}
-
-function upsertNearbyRequest(
-  current: NearbyRequest[],
-  device: Device,
-  slug: string
-) {
-  const nextItem: NearbyRequest = {
-    deviceId: device.id,
-    slug,
-    name: device.localName ?? device.name ?? slug,
-    rssi: device.rssi ?? null,
-    lastSeenAt: Date.now(),
-  };
-
-  const existingIndex = current.findIndex((item) => item.slug === slug);
-
-  if (existingIndex === -1) {
-    return [...current, nextItem].sort((a, b) => (b.rssi ?? -200) - (a.rssi ?? -200));
-  }
-
-  const next = [...current];
-  next[existingIndex] = nextItem;
-  return next.sort((a, b) => (b.rssi ?? -200) - (a.rssi ?? -200));
+  return normalized.length <= 6 ? normalized : normalized.slice(-6);
 }
 
 export default function NearbyPaymentsScreen() {
-  const params = useLocalSearchParams<{
-    slug?: string | string[];
-  }>();
-  const router = useRouter();
-  const insets = useSafeAreaInsets();
-  const managerRef = useRef<BleManager | null>(null);
-  const hostSlug = Array.isArray(params.slug) ? params.slug[0] : params.slug;
-  const mode = hostSlug ? "host" : "scan";
-
-  const [permissionGranted, setPermissionGranted] = useState<boolean | null>(null);
-  const [bluetoothState, setBluetoothState] = useState<State | null>(null);
-  const [nearbyRequests, setNearbyRequests] = useState<NearbyRequest[]>([]);
-  const [hostLink, setHostLink] = useState<PaymentLink | null>(null);
-  const [isScanning, setIsScanning] = useState(false);
-  const [isAdvertising, setIsAdvertising] = useState(false);
+  const { profile, status, tokens } = useSession();
+  const serviceRef = useRef<NearbyBluetoothService | null>(null);
+  const incomingPaymentRef = useRef<IncomingNearbyPayment | null>(null);
+  const [nearbyUsers, setNearbyUsers] = useState<NearbyUser[]>([]);
+  const [discoverableEnabled, setDiscoverableEnabled] = useState(false);
+  const [amount, setAmount] = useState("10.00");
+  const [currency, setCurrency] = useState("GBP");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [isScanning, setIsScanning] = useState(false);
+  const [isDiscoverable, setIsDiscoverable] = useState(false);
+  const [busyPublicUserId, setBusyPublicUserId] = useState<string | null>(null);
+  const [senderFlow, setSenderFlow] = useState<SenderFlowState | null>(null);
+  const [incomingPayment, setIncomingPayment] = useState<IncomingNearbyPayment | null>(
+    null
+  );
+  const [incomingPaymentState, setIncomingPaymentState] = useState<
+    "pending" | "verifying" | "completed"
+  >("pending");
+  const [isCompletingSenderFlow, setIsCompletingSenderFlow] = useState(false);
+  const profileUsername = profile?.username ?? null;
+  const publicUserId = profile?.publicUserId ?? null;
+
+  function getUiErrorMessage(error: unknown, fallback: string) {
+    if (error instanceof Error && error.message) {
+      return error.message;
+    }
+
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "reason" in error &&
+      typeof (error as { reason?: unknown }).reason === "string"
+    ) {
+      return (error as { reason: string }).reason;
+    }
+
+    return fallback;
+  }
+
+  function getService() {
+    if (!serviceRef.current) {
+      serviceRef.current = new NearbyBluetoothService();
+    }
+
+    return serviceRef.current;
+  }
+
+  const canUseNearby = Boolean(
+    status === "signed_in" &&
+      tokens?.accessToken &&
+      profileUsername &&
+      publicUserId
+  );
 
   useEffect(() => {
-    const manager = new BleManager();
-    managerRef.current = manager;
+    incomingPaymentRef.current = incomingPayment;
+  }, [incomingPayment]);
 
+  useEffect(() => {
     return () => {
-      try {
-        manager.stopDeviceScan();
-      } catch {
-        // Ignore cleanup errors.
-      }
-
-      try {
-        stopAdvertising();
-      } catch {
-        // Ignore cleanup errors.
-      }
-
-      manager.destroy();
-      managerRef.current = null;
+      void serviceRef.current?.stopAll();
+      serviceRef.current = null;
     };
   }, []);
 
   useEffect(() => {
-    if (!hostSlug) {
+    if (!canUseNearby) {
       return;
     }
 
-    let active = true;
-    const slug = hostSlug;
-
-    async function loadHostLink() {
-      try {
-        const paymentLink = await fetchPublicPaymentLink(slug);
-
-        if (!active) {
-          return;
-        }
-
-        setHostLink(paymentLink);
-      } catch (error) {
-        if (!active) {
-          return;
-        }
-
-        setErrorMessage(
-          error instanceof ApiError
-            ? error.message
-            : "We could not load this payment request for nearby sharing."
-        );
-      }
-    }
-
-    void loadHostLink();
-
-    return () => {
-      active = false;
-    };
-  }, [hostSlug]);
+    getService().primeCentralManager();
+  }, [canUseNearby]);
 
   useEffect(() => {
-    if (mode !== "scan" || !managerRef.current) {
+    if (status !== "signed_in") {
       return;
     }
 
-    let active = true;
-    let stateSubscription: { remove(): void } | null = null;
+    if (!profileUsername) {
+      router.replace("/onboarding" as Href);
+    }
+  }, [profileUsername, status]);
 
-    async function setupScan() {
+  const discoveredUsers = useMemo(
+    () =>
+      nearbyUsers.filter(
+        (user) => user.publicUserId !== publicUserId
+      ),
+    [nearbyUsers, publicUserId]
+  );
+
+  async function handleStartScanning() {
+    if (!canUseNearby) {
+      return;
+    }
+
+    try {
       const granted = await requestNearbyPermissions("scan");
-
-      if (!active) {
-        return;
-      }
-
-      setPermissionGranted(granted);
 
       if (!granted) {
         setErrorMessage(getNearbyPermissionErrorMessage("scan"));
         return;
       }
 
-      stateSubscription = managerRef.current!.onStateChange((nextState) => {
-        if (!active) {
-          return;
-        }
+      const bluetoothState = await getService().waitForUsableState();
+      const bluetoothError = getBluetoothStateErrorMessage(bluetoothState, "scan");
 
-        setBluetoothState(nextState);
-
-        if (nextState !== State.PoweredOn) {
-          setIsScanning(false);
-          setErrorMessage(getBluetoothStateErrorMessage(nextState, "scan"));
-          return;
-        }
-
-        setErrorMessage(null);
-        setIsScanning(true);
-        managerRef.current?.stopDeviceScan();
-        void managerRef.current?.startDeviceScan(
-          [NEARBY_PAYMENT_SERVICE_UUID],
-          { scanMode: ScanMode.LowLatency, allowDuplicates: false },
-          (error, device) => {
-            if (!active) {
-              return;
-            }
-
-            if (error) {
-              setIsScanning(false);
-              setErrorMessage(error.message);
-              return;
-            }
-
-            if (!device) {
-              return;
-            }
-
-            const slug = parseNearbyAdvertisedSlug(device.localName ?? device.name);
-
-            if (!slug) {
-              return;
-            }
-
-            setNearbyRequests((current) => upsertNearbyRequest(current, device, slug));
-          }
+      if (bluetoothError) {
+        setErrorMessage(
+          bluetoothState === State.Unknown
+            ? "Bluetooth is still initializing. Try again in a moment."
+            : bluetoothError
         );
-      }, true);
-    }
+        return;
+      }
 
-    void setupScan();
-
-    return () => {
-      active = false;
-      stateSubscription?.remove();
-      managerRef.current?.stopDeviceScan();
-      setIsScanning(false);
-    };
-  }, [mode]);
-
-  async function handleStartAdvertising() {
-    if (!hostLink) {
-      return;
-    }
-
-    const granted = await requestNearbyPermissions("advertise");
-    setPermissionGranted(granted);
-
-    if (!granted) {
-      setErrorMessage(getNearbyPermissionErrorMessage("advertise"));
-      return;
-    }
-
-    const currentState = await managerRef.current?.state();
-
-    if (currentState && currentState !== State.PoweredOn) {
-      setBluetoothState(currentState);
-      setErrorMessage(getBluetoothStateErrorMessage(currentState, "advertise"));
-      return;
-    }
-
-    if (hostLink.status !== "active") {
-      setErrorMessage("Only active payment links can be shared nearby.");
-      return;
-    }
-
-    try {
-      setErrorMessage(null);
-      const localName = buildNearbyAdvertisedName(hostLink.slug);
-
-      setServices([
-        {
-          uuid: NEARBY_PAYMENT_SERVICE_UUID,
-          characteristics: [
-            {
-              uuid: NEARBY_PAYMENT_CHARACTERISTIC_UUID,
-              properties: ["read"],
-              value: hostLink.slug,
-            },
-          ],
+      getService().startScanning({
+        onUsersUpdated: (users) => {
+          setNearbyUsers(users);
         },
-      ]);
-
-      startAdvertising({
-        serviceUUIDs: [NEARBY_PAYMENT_SERVICE_UUID],
-        localName,
-        advertisingData: {
-          completeLocalName: localName,
-          completeServiceUUIDs128: [NEARBY_PAYMENT_SERVICE_UUID],
+        onError: (message) => {
+          setErrorMessage(message);
+          setIsScanning(false);
         },
       });
 
-      setIsAdvertising(true);
+      setErrorMessage(null);
+      setIsScanning(true);
     } catch (error) {
-      setIsAdvertising(false);
-      setErrorMessage(
-        error instanceof Error
-          ? error.message
-          : "Could not start nearby advertising."
-      );
+      setErrorMessage(getUiErrorMessage(error, "Could not start nearby scan."));
+      setIsScanning(false);
     }
   }
 
-  function handleStopAdvertising() {
+  function handleStopScanning() {
+    serviceRef.current?.stopScanning();
+    setIsScanning(false);
+  }
+
+  async function handleSetDiscoverable(nextValue: boolean) {
+    setDiscoverableEnabled(nextValue);
+
+    if (!nextValue) {
+      serviceRef.current?.stopDiscoverable();
+      setIsDiscoverable(false);
+      setStatusMessage("Nearby discoverable mode stopped.");
+      return;
+    }
+
+    if (!canUseNearby) {
+      return;
+    }
+
+    if (Platform.OS === "ios") {
+      setDiscoverableEnabled(false);
+      setIsDiscoverable(false);
+      setErrorMessage(
+        "Nearby discoverable mode is temporarily disabled on iOS while the peripheral bridge is being stabilized. Scan still works."
+      );
+      return;
+    }
+
+    if (!getService().supportsDiscoverableMode()) {
+      setDiscoverableEnabled(false);
+      setIsDiscoverable(false);
+      setErrorMessage(
+        "This build does not expose the Bluetooth peripheral bridge yet. Rebuild the dev client after installing the native patch."
+      );
+      return;
+    }
+
     try {
-      stopAdvertising();
-      setIsAdvertising(false);
+      const granted = await requestNearbyPermissions("advertise");
+
+      if (!granted) {
+        setErrorMessage(getNearbyPermissionErrorMessage("advertise"));
+        setDiscoverableEnabled(false);
+        return;
+      }
+
+      const bluetoothState = await getService().waitForUsableState();
+      const bluetoothError = getBluetoothStateErrorMessage(
+        bluetoothState,
+        "advertise"
+      );
+
+      if (bluetoothError) {
+        setErrorMessage(
+          bluetoothState === State.Unknown
+            ? "Bluetooth is still initializing. Try again in a moment."
+            : bluetoothError
+        );
+        setDiscoverableEnabled(false);
+        return;
+      }
+
+      getService().startDiscoverable({
+        username: profileUsername!,
+        publicUserId: publicUserId!,
+        onAdvertisingStateChanged: (nextState, errorCode) => {
+          if (nextState === "starting") {
+            setStatusMessage("Starting nearby discoverable mode…");
+            setIsDiscoverable(false);
+            return;
+          }
+
+          if (nextState === "started") {
+            setStatusMessage(
+              "This device is now discoverable to nearby Android devices."
+            );
+            setErrorMessage(null);
+            setIsDiscoverable(true);
+            return;
+          }
+
+          if (nextState === "stopped") {
+            setStatusMessage("Nearby discoverable mode stopped.");
+            setIsDiscoverable(false);
+            return;
+          }
+
+          setIsDiscoverable(false);
+          setDiscoverableEnabled(false);
+          setStatusMessage(null);
+          setErrorMessage(
+            errorCode != null
+              ? `Nearby advertising failed on this device (code ${errorCode}).`
+              : "Nearby advertising failed on this device."
+          );
+        },
+        onIncomingPayment: (payment) => {
+          setIncomingPayment(payment);
+          setIncomingPaymentState("pending");
+          setStatusMessage(
+            `@${payment.senderUsername} is sending ${formatMinorCurrencyAmount(
+              payment.amountMinor,
+              payment.currency
+            )}.`
+          );
+        },
+        onDoneReceived: (message: NearbyDoneMessage) => {
+          if (!tokens?.accessToken) {
+            return;
+          }
+
+          if (
+            incomingPaymentRef.current?.paymentIntentId !== message.paymentIntentId
+          ) {
+            return;
+          }
+
+          setIncomingPaymentState("verifying");
+          void fetchNearbyPaymentIntent(message.paymentIntentId, tokens.accessToken)
+            .then((paymentIntent) => {
+              if (paymentIntent.status === "completed") {
+                setIncomingPaymentState("completed");
+                setStatusMessage("Nearby payment verified successfully.");
+              } else {
+                setErrorMessage(
+                  "Nearby completion was received, but the backend has not confirmed success yet."
+                );
+              }
+            })
+            .catch((error) => {
+              setErrorMessage(
+                getUiErrorMessage(
+                  error,
+                  "Could not verify the nearby payment status."
+                )
+              );
+            });
+        },
+        onError: (message) => {
+          setErrorMessage(message);
+          setIsDiscoverable(false);
+          setDiscoverableEnabled(false);
+        },
+      });
+
+      setErrorMessage(null);
     } catch (error) {
+      setDiscoverableEnabled(false);
+      setIsDiscoverable(false);
       setErrorMessage(
-        error instanceof Error
-          ? error.message
-          : "Could not stop nearby advertising."
+        getUiErrorMessage(error, "Could not enable nearby discoverable mode.")
       );
     }
   }
 
-  function handleOpenNearbyRequest(slug: string) {
-    managerRef.current?.stopDeviceScan();
-    router.replace(`/payments/qr/${slug}` as Href);
+  function updateNearbyUserStatus(
+    publicUserId: string,
+    nextStatus: NearbyUser["status"]
+  ) {
+    setNearbyUsers((currentUsers) =>
+      currentUsers.map((user) =>
+        user.publicUserId === publicUserId
+          ? {
+              ...user,
+              status: nextStatus,
+            }
+          : user
+      )
+    );
   }
+
+  async function handleSendToNearbyUser(user: NearbyUser) {
+    if (!tokens?.accessToken || !profile?.username) {
+      setErrorMessage("Sign in again before using nearby payments.");
+      return;
+    }
+
+    setErrorMessage(null);
+    setStatusMessage(null);
+    setBusyPublicUserId(user.publicUserId);
+
+    try {
+      const amountMinor = parseMajorAmountToMinorUnits(amount);
+      const normalizedCurrency = currency.trim().toUpperCase();
+      const paymentIntent = await createNearbyPaymentIntent(
+        {
+          receiverPublicUserId: user.publicUserId,
+          amountMinor,
+          currency: normalizedCurrency,
+        },
+        tokens.accessToken
+      );
+
+      setSenderFlow({
+        user,
+        paymentIntentId: paymentIntent.paymentIntentId,
+        amountMinor,
+        currency: normalizedCurrency,
+        status: "connecting",
+      });
+      updateNearbyUserStatus(user.publicUserId, "connecting");
+
+      await getService().connectAndSendPay({
+        deviceId: user.deviceId,
+        paymentIntentId: paymentIntent.paymentIntentId,
+        senderUsername: profile.username,
+        amountMinor,
+        currency: normalizedCurrency,
+        onDeviceStatus: (nextStatus) => {
+          updateNearbyUserStatus(user.publicUserId, nextStatus);
+          setSenderFlow((currentFlow) =>
+            currentFlow && currentFlow.paymentIntentId === paymentIntent.paymentIntentId
+              ? {
+                  ...currentFlow,
+                  status:
+                    nextStatus === "connected" ? "awaiting_ack" : "connecting",
+                }
+              : currentFlow
+          );
+        },
+        onAck: (paymentIntentId) => {
+          setSenderFlow((currentFlow) =>
+            currentFlow && currentFlow.paymentIntentId === paymentIntentId
+              ? {
+                  ...currentFlow,
+                  status: "acked",
+                }
+              : currentFlow
+          );
+          setStatusMessage("Nearby payment acknowledged by the receiving device.");
+        },
+      });
+    } catch (error) {
+      setSenderFlow(null);
+      setErrorMessage(
+        getUiErrorMessage(error, "Could not send the nearby payment payload.")
+      );
+      updateNearbyUserStatus(user.publicUserId, "discovered");
+    } finally {
+      setBusyPublicUserId(null);
+    }
+  }
+
+  async function handleMarkSenderFlowSuccessful() {
+    if (!senderFlow || !tokens?.accessToken) {
+      return;
+    }
+
+    setIsCompletingSenderFlow(true);
+    setErrorMessage(null);
+
+    try {
+      await completeNearbyPaymentIntent(senderFlow.paymentIntentId, tokens.accessToken);
+      await getService().sendDone(senderFlow.paymentIntentId);
+      setSenderFlow((currentFlow) =>
+        currentFlow
+          ? {
+              ...currentFlow,
+              status: "completed",
+            }
+          : null
+      );
+      setStatusMessage("Nearby payment marked successful and sent to the receiver.");
+    } catch (error) {
+      setErrorMessage(
+        getUiErrorMessage(error, "Could not complete the nearby payment.")
+      );
+    } finally {
+      setIsCompletingSenderFlow(false);
+    }
+  }
+
+  const isNearbyReady = canUseNearby && Boolean(profileUsername && publicUserId);
 
   return (
-    <View
-      style={[
-        styles.container,
-        { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 24 },
-      ]}
-    >
-      <View style={styles.header}>
-        <Pressable onPress={() => router.back()} style={styles.iconButton}>
-          <Ionicons name="close" size={24} color="#1b150f" />
-        </Pressable>
+    <BlurScrollScreen title="Nearby" contentStyle={styles.container}>
+      <View style={styles.headerRow}>
+        <Button
+          variant="ghost"
+          size="sm"
+          onPress={() => router.back()}
+          leftIcon={<Ionicons name="close" size={18} color={colors.brand.default} />}
+        >
+          Close
+        </Button>
       </View>
 
-      <View style={styles.card}>
-        <Text style={styles.eyebrow}>Nearby</Text>
-        <Text style={styles.title}>
-          {mode === "host" ? "Share nearby payment request" : "Find nearby payment requests"}
+      <Card style={styles.card}>
+        <Text variant="eyebrow">Nearby pay</Text>
+        <Text variant="h3">Send money to a nearby Urnway user.</Text>
+        <Text variant="bodySmall" color="secondary">
+          Nearby discovery stays on-device over Bluetooth. The backend only creates
+          and verifies the payment intent.
         </Text>
-        <Text style={styles.bodyText}>
-          {mode === "host"
-            ? "Broadcast this request over Bluetooth so another nearby device can discover it."
-            : "Scan for nearby Urnway payment requests and open one directly."}
+      </Card>
+
+      <Card style={styles.card}>
+        <Text variant="label">Your nearby identity</Text>
+        <Text variant="body" weight="medium">
+          @{profile?.username ?? "username required"}
         </Text>
-      </View>
+        <Text variant="bodySmall" color="secondary">
+          {profile?.publicUserId ?? "public id unavailable"}
+        </Text>
 
-      {permissionGranted === false ? (
-        <View style={styles.card}>
-          <Text style={styles.errorText}>
-            {mode === "host"
-              ? "Bluetooth permissions are required to share this request nearby."
-              : "Bluetooth permissions are required to scan for nearby requests."}
-          </Text>
-        </View>
-      ) : null}
-
-      {bluetoothState &&
-      bluetoothState !== State.PoweredOn &&
-      (mode === "scan" || mode === "host") ? (
-        <View style={styles.card}>
-          <Text style={styles.warningText}>
-            Bluetooth state: {bluetoothState}.
-            {" "}
-            {getBluetoothStateErrorMessage(
-              bluetoothState,
-              mode === "host" ? "advertise" : "scan"
-            ) ?? "Turn Bluetooth on to continue."}
-          </Text>
-        </View>
-      ) : null}
-
-      {mode === "host" ? (
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Broadcast request</Text>
-
-          {hostLink ? (
-            <>
-              <Text style={styles.linkAmount}>
-                {hostLink.amount} {hostLink.currency}
-              </Text>
-              <Text style={styles.caption}>{hostLink.slug}</Text>
-              <Text style={styles.bodyText}>
-                Recipient: {hostLink.recipient.displayName}
-              </Text>
-              <Text style={styles.bodyText}>Status: {hostLink.status}</Text>
-              <Text style={styles.caption}>
-                Nearby name: {buildNearbyAdvertisedName(hostLink.slug)}
-              </Text>
-            </>
-          ) : (
-            <Text style={styles.bodyText}>Loading request…</Text>
-          )}
-
-          <View style={styles.buttonRow}>
-            {isAdvertising ? (
-              <Pressable
-                onPress={handleStopAdvertising}
-                style={styles.secondaryButton}
-              >
-                <Text style={styles.secondaryButtonText}>Stop broadcast</Text>
-              </Pressable>
-            ) : (
-              <Pressable
-                onPress={() => void handleStartAdvertising()}
-                style={styles.primaryButton}
-              >
-                <Text style={styles.primaryButtonText}>Start nearby broadcast</Text>
-              </Pressable>
-            )}
-          </View>
-
-          <Text style={styles.caption}>
-            Keep this screen open while the other device scans.
-          </Text>
-        </View>
-      ) : (
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Discovered requests</Text>
-          <Text style={styles.caption}>
-            {isScanning ? "Scanning…" : "Waiting for Bluetooth…"}
-          </Text>
-
-          {nearbyRequests.length === 0 ? (
-            <Text style={styles.bodyText}>
-              No nearby requests yet. Ask the other device to start broadcasting.
+        <View style={styles.toggleRow}>
+          <View style={styles.toggleCopy}>
+            <Text variant="label">Discoverable</Text>
+            <Text variant="bodySmall" color="secondary">
+              Let nearby users find you and send a nearby pay request.
             </Text>
-          ) : (
-            nearbyRequests.map((item) => (
-              <Pressable
-                key={`${item.slug}-${item.deviceId}`}
-                onPress={() => handleOpenNearbyRequest(item.slug)}
-                style={styles.requestCard}
-              >
-                <Text style={styles.requestTitle}>{item.slug}</Text>
-                <Text style={styles.bodyText}>{item.name}</Text>
-                <Text style={styles.caption}>
-                  Signal {item.rssi ?? "unknown"} dBm
-                </Text>
-              </Pressable>
-            ))
-          )}
-
-          <View style={styles.buttonRow}>
-            <Pressable
-              onPress={() => {
-                setNearbyRequests([]);
-                setErrorMessage(null);
-              }}
-              style={styles.secondaryButton}
-            >
-              <Text style={styles.secondaryButtonText}>Clear list</Text>
-            </Pressable>
           </View>
+          <Toggle
+            value={discoverableEnabled}
+            onValueChange={(nextValue) => void handleSetDiscoverable(nextValue)}
+          />
         </View>
-      )}
+
+        <Text variant="caption" color="secondary">
+          Scan: {isScanning ? "active" : "stopped"} • Discoverable:{" "}
+          {isDiscoverable ? "on" : "off"}
+        </Text>
+
+        <View style={styles.actionRow}>
+          <Button
+            size="sm"
+            variant={isScanning ? "ghost" : "primary"}
+            disabled={!isNearbyReady}
+            onPress={() =>
+              isScanning ? handleStopScanning() : void handleStartScanning()
+            }
+          >
+            {isScanning ? "Stop scan" : "Start scan"}
+          </Button>
+        </View>
+      </Card>
+
+      <Card style={styles.card}>
+        <Text variant="h4">Send amount</Text>
+        <Input
+          label="Amount"
+          keyboardType="decimal-pad"
+          onChangeText={(value) => setAmount(value)}
+          placeholder="10.00"
+          value={amount}
+        />
+        <Input
+          autoCapitalize="characters"
+          label="Currency"
+          maxLength={8}
+          onChangeText={(value) => setCurrency(value.toUpperCase())}
+          placeholder="GBP"
+          value={currency}
+        />
+      </Card>
+
+      <Card style={styles.card}>
+        <Text variant="h4">Nearby users</Text>
+        <Text variant="bodySmall" color="secondary">
+          Nearby users appear directly from BLE advertising payloads.
+        </Text>
+
+        {discoveredUsers.length === 0 ? (
+          <Text variant="bodySmall" color="secondary">
+            No nearby users yet. Ask the other device to open Nearby and turn on
+            discoverable mode.
+          </Text>
+        ) : (
+          discoveredUsers.map((user) => (
+            <View key={user.publicUserId} style={styles.userRow}>
+              <View style={styles.userCopy}>
+                <Text variant="body" weight="medium">
+                  @{user.username} · {formatNearbyListShortPublicId(user.publicUserId)}
+                </Text>
+                <Text variant="caption" color="secondary">
+                  {user.publicUserId}
+                </Text>
+                <Text variant="caption" color="secondary">
+                  RSSI {user.rssi ?? "—"} • {user.status}
+                </Text>
+              </View>
+              <Button
+                size="sm"
+                loading={busyPublicUserId === user.publicUserId}
+                onPress={() => void handleSendToNearbyUser(user)}
+              >
+                Send
+              </Button>
+            </View>
+          ))
+        )}
+      </Card>
+
+      {senderFlow ? (
+        <Card style={styles.card}>
+          <Text variant="h4">Sender flow</Text>
+          <Text variant="body" weight="medium">
+            @{senderFlow.user.username}
+          </Text>
+          <Text variant="bodySmall" color="secondary">
+            Intent {senderFlow.paymentIntentId}
+          </Text>
+          <Text variant="bodySmall" color="secondary">
+            {formatMinorCurrencyAmount(senderFlow.amountMinor, senderFlow.currency)} •{" "}
+            {senderFlow.status}
+          </Text>
+
+          {senderFlow.status === "acked" ? (
+            <Button
+              loading={isCompletingSenderFlow}
+              onPress={() => void handleMarkSenderFlowSuccessful()}
+            >
+              Mark successful
+            </Button>
+          ) : null}
+        </Card>
+      ) : null}
+
+      {incomingPayment ? (
+        <Card style={styles.card}>
+          <Text variant="h4">Incoming nearby payment</Text>
+          <Text variant="body" weight="medium">
+            @{incomingPayment.senderUsername} is sending{" "}
+            {formatMinorCurrencyAmount(
+              incomingPayment.amountMinor,
+              incomingPayment.currency
+            )}
+          </Text>
+          <Text variant="bodySmall" color="secondary">
+            Intent {incomingPayment.paymentIntentId}
+          </Text>
+          <Text variant="bodySmall" color="secondary">
+            Receiver status: {incomingPaymentState}
+          </Text>
+        </Card>
+      ) : null}
+
+      {statusMessage ? (
+        <Card style={styles.infoCard}>
+          <Text variant="bodySmall">{statusMessage}</Text>
+        </Card>
+      ) : null}
 
       {errorMessage ? (
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Nearby error</Text>
-          <Text style={styles.errorText}>{errorMessage}</Text>
-        </View>
+        <Card style={styles.errorCard}>
+          <Text variant="bodySmall" style={styles.errorText}>
+            {errorMessage}
+          </Text>
+        </Card>
       ) : null}
-    </View>
+    </BlurScrollScreen>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    flex: 1,
-    gap: 16,
-    paddingHorizontal: 20,
-    backgroundColor: "#f7f1e8",
+    gap: spacing[4],
   },
-  header: {
+  headerRow: {
     flexDirection: "row",
     justifyContent: "flex-end",
   },
-  iconButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#fffaf3",
-  },
   card: {
-    borderRadius: 28,
-    backgroundColor: "#fffaf3",
-    padding: 24,
-    gap: 14,
+    gap: spacing[3],
   },
-  eyebrow: {
-    fontSize: 12,
-    fontWeight: "700",
-    textTransform: "uppercase",
-    letterSpacing: 1.2,
-    color: "#0e7a63",
-  },
-  title: {
-    fontSize: 28,
-    lineHeight: 32,
-    fontWeight: "700",
-    color: "#1b150f",
-  },
-  sectionTitle: {
-    fontSize: 20,
-    fontWeight: "700",
-    color: "#1b150f",
-  },
-  bodyText: {
-    fontSize: 15,
-    lineHeight: 22,
-    color: "#635448",
-  },
-  caption: {
-    fontSize: 13,
-    lineHeight: 18,
-    color: "#7a695e",
-  },
-  linkAmount: {
-    fontSize: 24,
-    lineHeight: 28,
-    fontWeight: "700",
-    color: "#1b150f",
-  },
-  requestCard: {
-    borderRadius: 22,
-    borderWidth: 1,
-    borderColor: "#e7dccf",
-    backgroundColor: "#ffffff",
-    padding: 18,
-    gap: 6,
-  },
-  requestTitle: {
-    fontSize: 18,
-    fontWeight: "700",
-    color: "#1b150f",
-  },
-  buttonRow: {
+  toggleRow: {
     flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 12,
-  },
-  primaryButton: {
     alignItems: "center",
-    borderRadius: 999,
-    backgroundColor: "#0e7a63",
-    paddingHorizontal: 20,
-    paddingVertical: 14,
+    justifyContent: "space-between",
+    gap: spacing[3],
   },
-  primaryButtonText: {
-    color: "#ffffff",
-    fontWeight: "700",
+  toggleCopy: {
+    flex: 1,
+    gap: spacing[1],
   },
-  secondaryButton: {
+  actionRow: {
+    flexDirection: "row",
+  },
+  userRow: {
+    flexDirection: "row",
     alignItems: "center",
-    borderRadius: 999,
-    backgroundColor: "#efe2cf",
-    paddingHorizontal: 20,
-    paddingVertical: 14,
+    justifyContent: "space-between",
+    gap: spacing[3],
+    paddingVertical: spacing[2],
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.border.default,
   },
-  secondaryButtonText: {
-    color: "#1b150f",
-    fontWeight: "700",
+  userCopy: {
+    flex: 1,
+    gap: spacing[0.5],
+  },
+  infoCard: {
+    gap: spacing[2],
+    backgroundColor: colors.brand.light,
+  },
+  errorCard: {
+    gap: spacing[2],
+    backgroundColor: "#fff2f0",
   },
   errorText: {
-    color: "#8a3b2d",
-    lineHeight: 20,
-  },
-  warningText: {
-    color: "#8a5f12",
-    lineHeight: 20,
+    color: colors.status.error,
+    fontSize: typography.fontSize.sm,
   },
 });

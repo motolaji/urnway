@@ -1,15 +1,18 @@
 import * as SecureStore from "expo-secure-store";
+import { Platform } from "react-native";
 
 import type {
   AuthPayload,
   BoardingPass,
   Booking,
+  CreateNearbyPaymentIntentInput,
   DirectSendPreflight,
   FlightBookingOffer,
   GeneratedTripItineraryDraft,
   HotelBookingOffer,
   LocationSuggestion,
   LocationSuggestionScope,
+  NearbyPaymentIntent,
   PaymentLink,
   PaymentLinkPreflight,
   PaymentQrRequest,
@@ -19,7 +22,10 @@ import type {
   TripItineraryItem,
   VaultGoal,
 } from "@urnway/contracts";
-import { getApiBaseUrl } from "@/lib/mobile-config";
+import {
+  buildAndroidEmulatorFallbackUrl,
+  getApiBaseUrl,
+} from "@/lib/mobile-config";
 
 const SESSION_STORAGE_KEY = "urnway.session";
 const BOARDING_PASSES_CACHE_KEY = "urnway.boarding-passes";
@@ -29,12 +35,14 @@ const BOARDING_PASS_CACHE_LIMIT = 8;
 export type {
   BoardingPass,
   Booking,
+  CreateNearbyPaymentIntentInput,
   DirectSendPreflight,
   FlightBookingOffer,
   GeneratedTripItineraryDraft,
   HotelBookingOffer,
   LocationSuggestion,
   LocationSuggestionScope,
+  NearbyPaymentIntent,
   PaymentLink,
   PaymentLinkPreflight,
   PaymentQrRequest,
@@ -239,6 +247,10 @@ type PaymentQrPreflight = {
   preflight: PaymentLinkPreflight["preflight"];
 };
 
+type NearbyPaymentIntentResponse = {
+  paymentIntent: NearbyPaymentIntent;
+};
+
 type ApiEnvelope<T> = {
   data: T | null;
   error: {
@@ -262,6 +274,7 @@ type UpdateCurrentUserResponse = {
   profile: {
     id: string;
     walletAddress: string;
+    publicUserId: string;
     username: string | null;
     displayName: string;
     mezoId: string | null;
@@ -275,6 +288,7 @@ type CurrentUserResponse = {
   profile: {
     id: string;
     walletAddress: string;
+    publicUserId: string;
     username: string | null;
     displayName: string;
     mezoId: string | null;
@@ -303,6 +317,39 @@ export class ApiError extends Error {
   }
 }
 
+function isProbablyNetworkError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("network request failed") ||
+    message.includes("failed to fetch") ||
+    message.includes("load failed")
+  );
+}
+
+function buildReachabilityHelp(baseUrl: string) {
+  try {
+    const url = new URL(baseUrl);
+
+    if (["localhost", "127.0.0.1"].includes(url.hostname)) {
+      return Platform.OS === "ios" || Platform.OS === "android"
+        ? "The app is still pointed at localhost. On a real phone, set EXPO_PUBLIC_API_BASE_URL to a public, tunnel, or LAN URL that the device can reach."
+        : null;
+    }
+
+    if (Platform.OS === "ios" && url.protocol === "http:") {
+      return "The app is calling the API over http on iOS. Use an https API URL, or rebuild the app with broader App Transport Security settings for local development.";
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 async function apiRequest<T>(
   path: string,
   {
@@ -315,14 +362,50 @@ async function apiRequest<T>(
     accessToken?: string;
   } = {}
 ) {
-  const response = await fetch(`${getApiBaseUrl()}${path}`, {
+  const requestInit = {
     method,
     headers: {
       "content-type": "application/json",
       ...(accessToken ? { authorization: `Bearer ${accessToken}` } : null),
     },
     body: body ? JSON.stringify(body) : undefined,
-  });
+  } satisfies RequestInit;
+
+  const primaryBaseUrl = getApiBaseUrl();
+  const primaryUrl = `${primaryBaseUrl}${path}`;
+  const fallbackBaseUrl = buildAndroidEmulatorFallbackUrl(primaryBaseUrl);
+
+  let response: Response;
+
+  try {
+    response = await fetch(primaryUrl, requestInit);
+  } catch (error) {
+    if (!fallbackBaseUrl || fallbackBaseUrl === primaryBaseUrl) {
+      if (isProbablyNetworkError(error)) {
+        throw new Error(
+          buildReachabilityHelp(primaryBaseUrl) ||
+            (error instanceof Error ? error.message : "Network request failed.")
+        );
+      }
+
+      throw error;
+    }
+
+    try {
+      response = await fetch(`${fallbackBaseUrl}${path}`, requestInit);
+    } catch (fallbackError) {
+      if (isProbablyNetworkError(fallbackError)) {
+        throw new Error(
+          buildReachabilityHelp(primaryBaseUrl) ||
+            (fallbackError instanceof Error
+              ? fallbackError.message
+              : "Network request failed.")
+        );
+      }
+
+      throw fallbackError;
+    }
+  }
 
   const envelope = (await response.json().catch(() => null)) as ApiEnvelope<T> | null;
 
@@ -924,6 +1007,43 @@ export function preflightDirectSend(
     body: input,
     accessToken,
   });
+}
+
+export function createNearbyPaymentIntent(
+  input: CreateNearbyPaymentIntentInput,
+  accessToken: string
+) {
+  return apiRequest<NearbyPaymentIntentResponse>("/v1/payments/nearby/intents", {
+    method: "POST",
+    body: input,
+    accessToken,
+  }).then((data) => data.paymentIntent);
+}
+
+export function fetchNearbyPaymentIntent(
+  paymentIntentId: string,
+  accessToken: string
+) {
+  return apiRequest<NearbyPaymentIntentResponse>(
+    `/v1/payments/nearby/intents/${paymentIntentId}`,
+    {
+      accessToken,
+    }
+  ).then((data) => data.paymentIntent);
+}
+
+export function completeNearbyPaymentIntent(
+  paymentIntentId: string,
+  accessToken: string
+) {
+  return apiRequest<NearbyPaymentIntentResponse>(
+    `/v1/payments/nearby/intents/${paymentIntentId}/complete`,
+    {
+      method: "POST",
+      body: {},
+      accessToken,
+    }
+  ).then((data) => data.paymentIntent);
 }
 
 export function submitPaymentLink(

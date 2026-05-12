@@ -10,6 +10,7 @@ import {
 export const users = pgTable('users', {
   id: uuid('id').defaultRandom().primaryKey(),
   walletAddress: text('wallet_address').notNull().unique(),
+  publicUserId: text('public_user_id').unique(),
   username: text('username'),
   mezoId: text('mezo_id'),
   email: text('email'),
@@ -81,6 +82,30 @@ export const paymentLinkAttempts = pgTable('payment_link_attempts', {
     .defaultNow()
     .notNull(),
   confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+});
+
+export const nearbyPaymentIntents = pgTable('nearby_payment_intents', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  intentId: text('intent_id').notNull().unique(),
+  senderUserId: uuid('sender_user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  receiverUserId: uuid('receiver_user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  senderUsername: text('sender_username').notNull(),
+  receiverPublicUserId: text('receiver_public_user_id').notNull(),
+  amountMinor: integer('amount_minor').notNull(),
+  currency: text('currency').notNull(),
+  status: text('status').default('created').notNull(),
+  completedAt: timestamp('completed_at', { withTimezone: true }),
+  expiresAt: timestamp('expires_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true })
     .defaultNow()
     .notNull(),

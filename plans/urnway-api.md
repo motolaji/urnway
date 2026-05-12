@@ -132,7 +132,9 @@ Purpose: power send/request, QR, links, escrow, and nearby discovery flows.
 - [x] Implement `DELETE /payments/links/:slug`
 - [ ] Implement `GET /payments/escrow`
 - [ ] Implement `POST /payments/escrow/:id/cancel`
-- [ ] Implement `POST /payments/nearby/discover`
+- [x] Implement `POST /payments/nearby/intents`
+- [x] Implement `POST /payments/nearby/intents/:id/complete`
+- [x] Implement `GET /payments/nearby/intents/:id`
 
 ### Savings
 

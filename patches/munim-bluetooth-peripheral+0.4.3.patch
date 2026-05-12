@@ -1,0 +1,1490 @@
+diff --git a/node_modules/munim-bluetooth-peripheral/android/src/main/java/com/bluetoothperipheral/BluetoothPeripheralModule.kt b/node_modules/munim-bluetooth-peripheral/android/src/main/java/com/bluetoothperipheral/BluetoothPeripheralModule.kt
+index 92ad36a..258947a 100644
+--- a/node_modules/munim-bluetooth-peripheral/android/src/main/java/com/bluetoothperipheral/BluetoothPeripheralModule.kt
++++ b/node_modules/munim-bluetooth-peripheral/android/src/main/java/com/bluetoothperipheral/BluetoothPeripheralModule.kt
+@@ -1,166 +1,354 @@
+ package com.bluetoothperipheral
+ 
+-import com.facebook.react.bridge.ReactApplicationContext
+-import com.facebook.react.bridge.ReactContextBaseJavaModule
+-import com.facebook.react.bridge.ReactMethod
+-import com.facebook.react.bridge.Promise
+ import android.bluetooth.BluetoothAdapter
++import android.bluetooth.BluetoothDevice
++import android.bluetooth.BluetoothGatt
++import android.bluetooth.BluetoothGattCharacteristic
++import android.bluetooth.BluetoothGattDescriptor
++import android.bluetooth.BluetoothGattServer
++import android.bluetooth.BluetoothGattServerCallback
++import android.bluetooth.BluetoothGattService
+ import android.bluetooth.BluetoothManager
++import android.bluetooth.BluetoothProfile
+ import android.bluetooth.le.AdvertiseCallback
+ import android.bluetooth.le.AdvertiseData
+ import android.bluetooth.le.AdvertiseSettings
+ import android.bluetooth.le.BluetoothLeAdvertiser
+-import android.bluetooth.BluetoothGattServer
+-import android.bluetooth.BluetoothGattServerCallback
+-import android.bluetooth.BluetoothGattService
+-import android.bluetooth.BluetoothGattCharacteristic
+ import android.content.Context
++import android.os.Build
+ import android.os.ParcelUuid
++import android.util.Log
++import com.facebook.react.bridge.Arguments
++import com.facebook.react.bridge.Promise
++import com.facebook.react.bridge.ReactApplicationContext
++import com.facebook.react.bridge.ReactContextBaseJavaModule
++import com.facebook.react.bridge.ReactMethod
+ import com.facebook.react.bridge.ReadableArray
+ import com.facebook.react.bridge.ReadableMap
+ import com.facebook.react.bridge.WritableMap
+-import com.facebook.react.bridge.Arguments
+-import android.util.Log
+-import kotlinx.coroutines.*
+-import java.util.*
+-
+-private var advertiser: BluetoothLeAdvertiser? = null
+-private var gattServer: BluetoothGattServer? = null
+-private var gattServerReady = false
+-private var advertiseJob: Job? = null
+-private var currentAdvertisingData: WritableMap? = null
++import com.facebook.react.modules.core.DeviceEventManagerModule
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.Job
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.launch
++import java.util.UUID
++
+ private const val TAG = "BluetoothPeripheralModule"
++private const val EVENT_CHARACTERISTIC_WRITE_RECEIVED = "characteristicWriteReceived"
++private const val EVENT_CENTRAL_CONNECTION_STATE_CHANGED = "centralConnectionStateChanged"
++private const val EVENT_CHARACTERISTIC_SUBSCRIPTION_CHANGED = "characteristicSubscriptionChanged"
++private const val EVENT_ADVERTISING_STATE_CHANGED = "advertisingStateChanged"
++private val CLIENT_CONFIGURATION_DESCRIPTOR_UUID =
++  UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+ 
+ class BluetoothPeripheralModule(reactContext: ReactApplicationContext) :
+   ReactContextBaseJavaModule(reactContext) {
+ 
++  private var advertiser: BluetoothLeAdvertiser? = null
++  private var gattServer: BluetoothGattServer? = null
++  private var gattServerReady = false
++  private var advertiseJob: Job? = null
++  private var currentAdvertisingData: WritableMap? = null
++  private val connectedDevices = mutableMapOf<String, BluetoothDevice>()
++  private val subscribedDeviceAddressesByCharacteristic =
++    mutableMapOf<String, MutableSet<String>>()
++
++  private val gattServerCallback = object : BluetoothGattServerCallback() {
++    override fun onConnectionStateChange(
++      device: BluetoothDevice,
++      status: Int,
++      newState: Int
++    ) {
++      val state =
++        when (newState) {
++          BluetoothProfile.STATE_CONNECTED -> "connected"
++          BluetoothProfile.STATE_DISCONNECTED -> "disconnected"
++          else -> return
++        }
++
++      if (state == "connected") {
++        connectedDevices[device.address] = device
++      } else {
++        connectedDevices.remove(device.address)
++        subscribedDeviceAddressesByCharacteristic.values.forEach { addresses ->
++          addresses.remove(device.address)
++        }
++      }
++
++      emitEvent(
++        EVENT_CENTRAL_CONNECTION_STATE_CHANGED,
++        Arguments.createMap().apply {
++          putString("deviceId", device.address)
++          putString("state", state)
++        }
++      )
++    }
++
++    override fun onCharacteristicReadRequest(
++      device: BluetoothDevice,
++      requestId: Int,
++      offset: Int,
++      characteristic: BluetoothGattCharacteristic
++    ) {
++      val value = characteristic.value ?: ByteArray(0)
++
++      if (offset > value.size) {
++        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_INVALID_OFFSET, offset, null)
++        return
++      }
++
++      val responseValue = if (offset == 0) value else value.copyOfRange(offset, value.size)
++      gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, responseValue)
++    }
++
++    override fun onCharacteristicWriteRequest(
++      device: BluetoothDevice,
++      requestId: Int,
++      characteristic: BluetoothGattCharacteristic,
++      preparedWrite: Boolean,
++      responseNeeded: Boolean,
++      offset: Int,
++      value: ByteArray?
++    ) {
++      val nextValue = value ?: ByteArray(0)
++      characteristic.value = nextValue
++
++      if (responseNeeded) {
++        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
++      }
++
++      emitEvent(
++        EVENT_CHARACTERISTIC_WRITE_RECEIVED,
++        Arguments.createMap().apply {
++          putString("deviceId", device.address)
++          putString("serviceUuid", characteristic.service.uuid.toString())
++          putString("characteristicUuid", characteristic.uuid.toString())
++          putString("value", nextValue.toString(Charsets.UTF_8))
++        }
++      )
++    }
++
++    override fun onDescriptorReadRequest(
++      device: BluetoothDevice,
++      requestId: Int,
++      offset: Int,
++      descriptor: BluetoothGattDescriptor
++    ) {
++      val value = descriptor.value ?: BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
++      gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
++    }
++
++    override fun onDescriptorWriteRequest(
++      device: BluetoothDevice,
++      requestId: Int,
++      descriptor: BluetoothGattDescriptor,
++      preparedWrite: Boolean,
++      responseNeeded: Boolean,
++      offset: Int,
++      value: ByteArray?
++    ) {
++      descriptor.value = value ?: BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
++
++      if (responseNeeded) {
++        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
++      }
++
++      if (descriptor.uuid != CLIENT_CONFIGURATION_DESCRIPTOR_UUID) {
++        return
++      }
++
++      val subscribed =
++        descriptor.value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ||
++          descriptor.value.contentEquals(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)
++
++      val key = characteristicKey(
++        descriptor.characteristic.service.uuid.toString(),
++        descriptor.characteristic.uuid.toString()
++      )
++      val subscribedAddresses =
++        subscribedDeviceAddressesByCharacteristic.getOrPut(key) { mutableSetOf() }
++
++      if (subscribed) {
++        subscribedAddresses.add(device.address)
++      } else {
++        subscribedAddresses.remove(device.address)
++      }
++
++      emitEvent(
++        EVENT_CHARACTERISTIC_SUBSCRIPTION_CHANGED,
++        Arguments.createMap().apply {
++          putString("deviceId", device.address)
++          putString("serviceUuid", descriptor.characteristic.service.uuid.toString())
++          putString("characteristicUuid", descriptor.characteristic.uuid.toString())
++          putBoolean("subscribed", subscribed)
++        }
++      )
++    }
++  }
++
+   override fun getName(): String {
+     return "BluetoothPeripheral"
+   }
+ 
++  @ReactMethod
++  fun addListener(_eventName: String) {
++    // Required for NativeEventEmitter compatibility.
++  }
++
++  @ReactMethod
++  fun removeListeners(_count: Double) {
++    // Required for NativeEventEmitter compatibility.
++  }
++
+   @ReactMethod
+   fun startAdvertising(options: ReadableMap) {
+-    val bluetoothManager = reactApplicationContext.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
++    val bluetoothManager =
++      reactApplicationContext.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+     val bluetoothAdapter = bluetoothManager.adapter
+     if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled) {
+       Log.e(TAG, "Bluetooth is not enabled or not available")
+       return
+     }
+-    
++
+     val serviceUUIDs = options.getArray("serviceUUIDs")
+-    if (serviceUUIDs == null || serviceUUIDs.size() == 0) {
+-      Log.e(TAG, "No service UUIDs provided for advertising")
+-      return
+-    }
+-    
+-    // Ensure GATT server is set up before advertising
+-    if (!gattServerReady) {
++    if (!gattServerReady && serviceUUIDs != null && serviceUUIDs.size() > 0) {
+       setServicesFromOptions(serviceUUIDs)
+     }
+-    
+-    // Cancel any previous advertising job
++
+     advertiseJob?.cancel()
+     advertiseJob = CoroutineScope(Dispatchers.Main).launch {
+-      delay(300) // Wait for GATT server to be ready
++      delay(300)
+       advertiser = bluetoothAdapter.bluetoothLeAdvertiser
+-      
++
+       val settings = AdvertiseSettings.Builder()
+         .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+         .setConnectable(true)
+         .setTimeout(0)
+         .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+         .build()
+-      
++
+       val dataBuilder = AdvertiseData.Builder()
+-      
+-      // Process comprehensive advertising data
+       val advertisingDataMap = options.getMap("advertisingData")
+       if (advertisingDataMap != null) {
+         processAdvertisingData(advertisingDataMap, dataBuilder)
+       }
+-      
+-      // Legacy support - add service UUIDs
+-      for (i in 0 until serviceUUIDs.size()) {
+-        val uuid = serviceUUIDs.getString(i)
+-        if (uuid != null) {
+-          dataBuilder.addServiceUuid(ParcelUuid.fromString(uuid))
++
++      if (serviceUUIDs != null) {
++        for (index in 0 until serviceUUIDs.size()) {
++          val uuid = serviceUUIDs.getString(index)
++          if (uuid != null) {
++            dataBuilder.addServiceUuid(ParcelUuid.fromString(uuid))
++          }
+         }
+       }
+-      
+-      // Legacy support - local name
++
+       val localName = options.getString("localName")
+       if (localName != null) {
+         bluetoothAdapter.name = localName
+-        dataBuilder.addServiceData(
+-          ParcelUuid.fromString("0000180D-0000-1000-8000-00805F9B34FB"), // Heart Rate Service UUID as placeholder
+-          localName.toByteArray()
+-        )
++        dataBuilder.setIncludeDeviceName(true)
+       }
+-      
+-      // Legacy support - manufacturer data
++
+       val manufacturerData = options.getString("manufacturerData")
+       if (manufacturerData != null) {
+         val data = hexStringToByteArray(manufacturerData)
+         if (data != null) {
+-          dataBuilder.addManufacturerData(0x0000, data) // Default manufacturer code
++          dataBuilder.addManufacturerData(0xFFFF, data)
+         }
+       }
+-      
++
+       currentAdvertisingData = Arguments.createMap().apply {
+         putMap("advertisingData", advertisingDataMap)
+         putString("localName", localName)
+         putString("manufacturerData", manufacturerData)
+       }
+-      
+-      advertiser?.startAdvertising(settings, dataBuilder.build(), object : AdvertiseCallback() {
+-        override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
+-          Log.i(TAG, "Advertising started successfully")
+-        }
+-        override fun onStartFailure(errorCode: Int) {
+-          Log.e(TAG, "Advertising failed: $errorCode")
++
++      advertiser?.startAdvertising(
++        settings,
++        dataBuilder.build(),
++        object : AdvertiseCallback() {
++          override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
++            Log.i(TAG, "Advertising started successfully")
++            emitEvent(
++              EVENT_ADVERTISING_STATE_CHANGED,
++              Arguments.createMap().apply {
++                putString("state", "started")
++              }
++            )
++          }
++
++          override fun onStartFailure(errorCode: Int) {
++            Log.e(TAG, "Advertising failed: $errorCode")
++            emitEvent(
++              EVENT_ADVERTISING_STATE_CHANGED,
++              Arguments.createMap().apply {
++                putString("state", "failed")
++                putInt("errorCode", errorCode)
++              }
++            )
++          }
+         }
+-      })
++      )
+     }
+   }
+ 
+   @ReactMethod
+   fun updateAdvertisingData(advertisingData: ReadableMap) {
+-    val bluetoothManager = reactApplicationContext.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
++    val bluetoothManager =
++      reactApplicationContext.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+     val bluetoothAdapter = bluetoothManager.adapter
+     if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled) {
+       Log.e(TAG, "Bluetooth is not enabled or not available")
+       return
+     }
+-    
++
+     advertiser?.stopAdvertising(object : AdvertiseCallback() {})
+-    
++
+     advertiseJob?.cancel()
+     advertiseJob = CoroutineScope(Dispatchers.Main).launch {
+-      delay(100) // Brief delay before restarting
++      delay(100)
+       advertiser = bluetoothAdapter.bluetoothLeAdvertiser
+-      
++
+       val settings = AdvertiseSettings.Builder()
+         .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+         .setConnectable(true)
+         .setTimeout(0)
+         .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+         .build()
+-      
++
+       val dataBuilder = AdvertiseData.Builder()
+       processAdvertisingData(advertisingData, dataBuilder)
+-      
++
+       currentAdvertisingData = Arguments.createMap().apply {
+         putMap("advertisingData", advertisingData)
+       }
+-      
+-      advertiser?.startAdvertising(settings, dataBuilder.build(), object : AdvertiseCallback() {
+-        override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
+-          Log.i(TAG, "Advertising updated successfully")
+-        }
+-        override fun onStartFailure(errorCode: Int) {
+-          Log.e(TAG, "Advertising update failed: $errorCode")
++
++      advertiser?.startAdvertising(
++        settings,
++        dataBuilder.build(),
++        object : AdvertiseCallback() {
++          override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
++            Log.i(TAG, "Advertising updated successfully")
++            emitEvent(
++              EVENT_ADVERTISING_STATE_CHANGED,
++              Arguments.createMap().apply {
++                putString("state", "started")
++              }
++            )
++          }
++
++          override fun onStartFailure(errorCode: Int) {
++            Log.e(TAG, "Advertising update failed: $errorCode")
++            emitEvent(
++              EVENT_ADVERTISING_STATE_CHANGED,
++              Arguments.createMap().apply {
++                putString("state", "failed")
++                putInt("errorCode", errorCode)
++              }
++            )
++          }
+         }
+-      })
++      )
+     }
+   }
+ 
+@@ -169,106 +357,77 @@ class BluetoothPeripheralModule(reactContext: ReactApplicationContext) :
+     promise.resolve(currentAdvertisingData)
+   }
+ 
+-  private fun processAdvertisingData(dataMap: ReadableMap, dataBuilder: AdvertiseData.Builder) {
+-    // 0x01 - Flags (partial support - affects connectable setting)
+-    if (dataMap.hasKey("flags")) {
+-      val flags = dataMap.getInt("flags")
+-      // Android AdvertiseData doesn't directly support flags, but we can interpret connectable flag
+-      // This is handled in AdvertiseSettings, not AdvertiseData
+-    }
+-    
+-    // 0x02-0x07 - Service UUIDs (fully supported)
++  private fun emitEvent(eventName: String, payload: WritableMap) {
++    reactApplicationContext
++      .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
++      .emit(eventName, payload)
++  }
++
++  private fun processAdvertisingData(
++    dataMap: ReadableMap,
++    dataBuilder: AdvertiseData.Builder
++  ) {
+     addServiceUUIDs(dataMap.getArray("incompleteServiceUUIDs16"), dataBuilder)
+     addServiceUUIDs(dataMap.getArray("completeServiceUUIDs16"), dataBuilder)
+     addServiceUUIDs(dataMap.getArray("incompleteServiceUUIDs32"), dataBuilder)
+     addServiceUUIDs(dataMap.getArray("completeServiceUUIDs32"), dataBuilder)
+     addServiceUUIDs(dataMap.getArray("incompleteServiceUUIDs128"), dataBuilder)
+     addServiceUUIDs(dataMap.getArray("completeServiceUUIDs128"), dataBuilder)
+-    
+-    // 0x08-0x09 - Local Name (fully supported)
+-    if (dataMap.hasKey("shortenedLocalName")) {
+-      val name = dataMap.getString("shortenedLocalName")
+-      if (name != null) {
+-        dataBuilder.setIncludeDeviceName(true)
+-        // Note: Android doesn't distinguish between shortened and complete local name in AdvertiseData
+-        // The system handles truncation automatically if needed
+-      }
+-    }
+-    if (dataMap.hasKey("completeLocalName")) {
+-      val name = dataMap.getString("completeLocalName")
+-      if (name != null) {
+-        dataBuilder.setIncludeDeviceName(true)
+-      }
++
++    if (dataMap.hasKey("shortenedLocalName") || dataMap.hasKey("completeLocalName")) {
++      dataBuilder.setIncludeDeviceName(true)
+     }
+-    
+-    // 0x0A - Tx Power Level (fully supported)
++
+     if (dataMap.hasKey("txPowerLevel")) {
+       dataBuilder.setIncludeTxPowerLevel(true)
+-      // Note: Android controls actual Tx power via AdvertiseSettings, not AdvertiseData
+     }
+-    
+-    // 0x14-0x15 - Service Solicitation UUIDs (fully supported)
++
+     addServiceUUIDs(dataMap.getArray("serviceSolicitationUUIDs16"), dataBuilder)
+     addServiceUUIDs(dataMap.getArray("serviceSolicitationUUIDs128"), dataBuilder)
+-    
+-    // 0x16, 0x20, 0x21 - Service Data (fully supported)
++
+     addServiceData(dataMap.getArray("serviceData16"), dataBuilder)
+     addServiceData(dataMap.getArray("serviceData32"), dataBuilder)
+     addServiceData(dataMap.getArray("serviceData128"), dataBuilder)
+-    
+-    // 0x19 - Appearance (partial support)
+-    if (dataMap.hasKey("appearance")) {
+-      val appearance = dataMap.getInt("appearance")
+-      // Android doesn't have direct AdvertiseData support for appearance
+-      // We can encode it as service data if needed, but this is not standard
+-      val appearanceData = byteArrayOf(
+-        (appearance and 0xFF).toByte(),
+-        ((appearance shr 8) and 0xFF).toByte()
+-      )
+-      // Use a standard service UUID for appearance data
+-      dataBuilder.addServiceData(
+-        ParcelUuid.fromString("00001800-0000-1000-8000-00805F9B34FB"), // Generic Access Service
+-        appearanceData
+-      )
+-    }
+-    
+-    // 0x1F - Service Solicitation (32-bit) (fully supported)
++
+     addServiceUUIDs(dataMap.getArray("serviceSolicitationUUIDs32"), dataBuilder)
+-    
+-    // 0xFF - Manufacturer Specific Data (fully supported)
++
+     if (dataMap.hasKey("manufacturerData")) {
+       val manufacturerData = hexStringToByteArray(dataMap.getString("manufacturerData"))
+       if (manufacturerData != null) {
+-        // Default manufacturer code - in real usage, this should be a registered company identifier
+         dataBuilder.addManufacturerData(0xFFFF, manufacturerData)
+       }
+     }
+   }
+ 
+   private fun addServiceUUIDs(uuids: ReadableArray?, dataBuilder: AdvertiseData.Builder) {
+-    if (uuids != null) {
+-      for (i in 0 until uuids.size()) {
+-        val uuid = uuids.getString(i)
+-        if (uuid != null) {
+-          dataBuilder.addServiceUuid(ParcelUuid.fromString(uuid))
+-        }
++    if (uuids == null) {
++      return
++    }
++
++    for (index in 0 until uuids.size()) {
++      val uuid = uuids.getString(index)
++      if (uuid != null) {
++        dataBuilder.addServiceUuid(ParcelUuid.fromString(uuid))
+       }
+     }
+   }
+ 
+-  private fun addServiceData(serviceDataArray: ReadableArray?, dataBuilder: AdvertiseData.Builder) {
+-    if (serviceDataArray != null) {
+-      for (i in 0 until serviceDataArray.size()) {
+-        val serviceData = serviceDataArray.getMap(i)
+-        if (serviceData != null) {
+-          val uuid = serviceData.getString("uuid")
+-          val data = serviceData.getString("data")
+-          if (uuid != null && data != null) {
+-            val dataBytes = hexStringToByteArray(data)
+-            if (dataBytes != null) {
+-              dataBuilder.addServiceData(ParcelUuid.fromString(uuid), dataBytes)
+-            }
+-          }
++  private fun addServiceData(
++    serviceDataArray: ReadableArray?,
++    dataBuilder: AdvertiseData.Builder
++  ) {
++    if (serviceDataArray == null) {
++      return
++    }
++
++    for (index in 0 until serviceDataArray.size()) {
++      val serviceData = serviceDataArray.getMap(index) ?: continue
++      val uuid = serviceData.getString("uuid")
++      val data = serviceData.getString("data")
++      if (uuid != null && data != null) {
++        val dataBytes = hexStringToByteArray(data)
++        if (dataBytes != null) {
++          dataBuilder.addServiceData(ParcelUuid.fromString(uuid), dataBytes)
+         }
+       }
+     }
+@@ -276,60 +435,91 @@ class BluetoothPeripheralModule(reactContext: ReactApplicationContext) :
+ 
+   private fun hexStringToByteArray(hexString: String?): ByteArray? {
+     if (hexString == null) return null
+-    
++
+     val cleanHex = hexString.replace(" ", "")
+     if (cleanHex.length % 2 != 0) return null
+-    
++
+     val bytes = ByteArray(cleanHex.length / 2)
+-    for (i in bytes.indices) {
+-      val index = i * 2
+-      bytes[i] = cleanHex.substring(index, index + 2).toInt(16).toByte()
++    for (index in bytes.indices) {
++      val stringIndex = index * 2
++      bytes[index] = cleanHex.substring(stringIndex, stringIndex + 2).toInt(16).toByte()
+     }
+     return bytes
+   }
+ 
++  private fun characteristicKey(serviceUuid: String, characteristicUuid: String) =
++    "${serviceUuid.lowercase()}|${characteristicUuid.lowercase()}"
++
+   @ReactMethod
+   fun stopAdvertising() {
+     advertiser?.stopAdvertising(object : AdvertiseCallback() {})
+     advertiser = null
+     advertiseJob?.cancel()
++    emitEvent(
++      EVENT_ADVERTISING_STATE_CHANGED,
++      Arguments.createMap().apply {
++        putString("state", "stopped")
++      }
++    )
+   }
+ 
+   @ReactMethod
+   fun setServices(services: ReadableArray) {
+     gattServerReady = false
+-    val bluetoothManager = reactApplicationContext.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+-    val bluetoothAdapter = bluetoothManager.adapter
+-    gattServer = bluetoothManager.openGattServer(reactApplicationContext, object : BluetoothGattServerCallback() {})
++    val bluetoothManager =
++      reactApplicationContext.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
++    gattServer?.close()
++    gattServer = bluetoothManager.openGattServer(reactApplicationContext, gattServerCallback)
+     gattServer?.clearServices()
+-    for (i in 0 until services.size()) {
+-      val serviceMap = services.getMap(i)
+-      if (serviceMap == null) continue
++    subscribedDeviceAddressesByCharacteristic.clear()
++    connectedDevices.clear()
++
++    for (serviceIndex in 0 until services.size()) {
++      val serviceMap = services.getMap(serviceIndex) ?: continue
+       val serviceUuid = serviceMap.getString("uuid") ?: continue
+-      val service = BluetoothGattService(java.util.UUID.fromString(serviceUuid), BluetoothGattService.SERVICE_TYPE_PRIMARY)
++      val service =
++        BluetoothGattService(UUID.fromString(serviceUuid), BluetoothGattService.SERVICE_TYPE_PRIMARY)
+       val characteristics = serviceMap.getArray("characteristics")
+       if (characteristics != null) {
+-        for (j in 0 until characteristics.size()) {
+-          val charMap = characteristics.getMap(j)
+-          if (charMap == null) continue
+-          val charUuid = charMap.getString("uuid") ?: continue
+-          val propertiesArray = charMap.getArray("properties")
++        for (characteristicIndex in 0 until characteristics.size()) {
++          val characteristicMap = characteristics.getMap(characteristicIndex) ?: continue
++          val characteristicUuid = characteristicMap.getString("uuid") ?: continue
++          val propertiesArray = characteristicMap.getArray("properties")
+           var properties = 0
+           if (propertiesArray != null) {
+-            for (k in 0 until propertiesArray.size()) {
+-              when (propertiesArray.getString(k)) {
++            for (propertyIndex in 0 until propertiesArray.size()) {
++              when (propertiesArray.getString(propertyIndex)) {
+                 "read" -> properties = properties or BluetoothGattCharacteristic.PROPERTY_READ
+                 "write" -> properties = properties or BluetoothGattCharacteristic.PROPERTY_WRITE
+                 "notify" -> properties = properties or BluetoothGattCharacteristic.PROPERTY_NOTIFY
++                "indicate" -> properties = properties or BluetoothGattCharacteristic.PROPERTY_INDICATE
+               }
+             }
+           }
+-          val permissions = BluetoothGattCharacteristic.PERMISSION_READ or BluetoothGattCharacteristic.PERMISSION_WRITE
+-          val characteristic = BluetoothGattCharacteristic(java.util.UUID.fromString(charUuid), properties, permissions)
+-          val value = charMap.getString("value")
++
++          val permissions =
++            BluetoothGattCharacteristic.PERMISSION_READ or
++              BluetoothGattCharacteristic.PERMISSION_WRITE
++          val characteristic =
++            BluetoothGattCharacteristic(UUID.fromString(characteristicUuid), properties, permissions)
++          val value = characteristicMap.getString("value")
+           if (value != null) {
+-            characteristic.value = value.toByteArray()
++            characteristic.value = value.toByteArray(Charsets.UTF_8)
+           }
++
++          val supportsNotify =
++            properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0 ||
++              properties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0
++          if (supportsNotify) {
++            val descriptor =
++              BluetoothGattDescriptor(
++                CLIENT_CONFIGURATION_DESCRIPTOR_UUID,
++                BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
++              )
++            descriptor.value = BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
++            characteristic.addDescriptor(descriptor)
++          }
++
+           service.addCharacteristic(characteristic)
+         }
+       }
+@@ -338,15 +528,48 @@ class BluetoothPeripheralModule(reactContext: ReactApplicationContext) :
+     gattServerReady = true
+   }
+ 
+-  // Helper to set up GATT server from serviceUUIDs array (for basic advertising)
++  @ReactMethod
++  fun updateCharacteristicValue(
++    serviceUuid: String,
++    characteristicUuid: String,
++    value: String,
++    notify: Boolean
++  ) {
++    val service = gattServer?.getService(UUID.fromString(serviceUuid)) ?: return
++    val characteristic = service.getCharacteristic(UUID.fromString(characteristicUuid)) ?: return
++    val nextValue = value.toByteArray(Charsets.UTF_8)
++    characteristic.value = nextValue
++
++    if (!notify) {
++      return
++    }
++
++    val subscribedAddresses =
++      subscribedDeviceAddressesByCharacteristic[characteristicKey(serviceUuid, characteristicUuid)]
++        ?: emptySet()
++    subscribedAddresses.forEach { deviceAddress ->
++      val device = connectedDevices[deviceAddress] ?: return@forEach
++      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
++        gattServer?.notifyCharacteristicChanged(device, characteristic, false, nextValue)
++      } else {
++        @Suppress("DEPRECATION")
++        gattServer?.notifyCharacteristicChanged(device, characteristic, false)
++      }
++    }
++  }
++
+   private fun setServicesFromOptions(serviceUUIDs: ReadableArray) {
+     gattServerReady = false
+-    val bluetoothManager = reactApplicationContext.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+-    gattServer = bluetoothManager.openGattServer(reactApplicationContext, object : BluetoothGattServerCallback() {})
++    val bluetoothManager =
++      reactApplicationContext.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
++    gattServer?.close()
++    gattServer = bluetoothManager.openGattServer(reactApplicationContext, gattServerCallback)
+     gattServer?.clearServices()
+-    for (i in 0 until serviceUUIDs.size()) {
+-      val uuid = serviceUUIDs.getString(i) ?: continue
+-      val service = BluetoothGattService(java.util.UUID.fromString(uuid), BluetoothGattService.SERVICE_TYPE_PRIMARY)
++
++    for (index in 0 until serviceUUIDs.size()) {
++      val uuid = serviceUUIDs.getString(index) ?: continue
++      val service =
++        BluetoothGattService(UUID.fromString(uuid), BluetoothGattService.SERVICE_TYPE_PRIMARY)
+       gattServer?.addService(service)
+     }
+     gattServerReady = true
+diff --git a/node_modules/munim-bluetooth-peripheral/ios/BluetoothPeripheral.h b/node_modules/munim-bluetooth-peripheral/ios/BluetoothPeripheral.h
+index 51186a6..e866dc8 100644
+--- a/node_modules/munim-bluetooth-peripheral/ios/BluetoothPeripheral.h
++++ b/node_modules/munim-bluetooth-peripheral/ios/BluetoothPeripheral.h
+@@ -1,5 +1,5 @@
+-#import <React/RCTBridgeModule.h>
++#import <React/RCTEventEmitter.h>
+ 
+-@interface BluetoothPeripheral : NSObject <RCTBridgeModule>
++@interface BluetoothPeripheral : RCTEventEmitter <RCTBridgeModule>
+ 
+ @end
+diff --git a/node_modules/munim-bluetooth-peripheral/ios/BluetoothPeripheral.mm b/node_modules/munim-bluetooth-peripheral/ios/BluetoothPeripheral.mm
+index 12a0217..230f4e7 100644
+--- a/node_modules/munim-bluetooth-peripheral/ios/BluetoothPeripheral.mm
++++ b/node_modules/munim-bluetooth-peripheral/ios/BluetoothPeripheral.mm
+@@ -1,263 +1,518 @@
+ #import "BluetoothPeripheral.h"
+ #import <CoreBluetooth/CoreBluetooth.h>
+ 
++static NSString *const kCharacteristicWriteReceivedEvent = @"characteristicWriteReceived";
++static NSString *const kCentralConnectionStateChangedEvent = @"centralConnectionStateChanged";
++static NSString *const kCharacteristicSubscriptionChangedEvent = @"characteristicSubscriptionChanged";
++
+ @interface BluetoothPeripheral () <CBPeripheralManagerDelegate>
+ @property (nonatomic, strong) CBPeripheralManager *peripheralManager;
+ @property (nonatomic, strong) NSMutableArray<CBMutableService *> *services;
+ @property (nonatomic, strong) NSDictionary *currentAdvertisingData;
++@property (nonatomic, strong)
++  NSMutableDictionary<NSString *, NSMutableArray<CBCentral *> *> *subscribedCentrals;
++@property (nonatomic, assign) BOOL hasListeners;
++@property (nonatomic, assign) BOOL servicesApplied;
++@property (nonatomic, assign) BOOL advertisingRequested;
+ @end
+ 
+ @implementation BluetoothPeripheral
+ 
+ RCT_EXPORT_MODULE();
+ 
+++ (BOOL)requiresMainQueueSetup {
++  return YES;
++}
++
+ - (instancetype)init {
+-    if (self = [super init]) {
+-        _peripheralManager = [[CBPeripheralManager alloc] initWithDelegate:self queue:nil];
+-        _services = [NSMutableArray array];
+-        _currentAdvertisingData = [NSDictionary dictionary];
+-    }
+-    return self;
++  if (self = [super init]) {
++    _peripheralManager = [[CBPeripheralManager alloc] initWithDelegate:self queue:nil];
++    _services = [NSMutableArray array];
++    _currentAdvertisingData = [NSDictionary dictionary];
++    _subscribedCentrals = [NSMutableDictionary dictionary];
++    _hasListeners = NO;
++    _servicesApplied = NO;
++    _advertisingRequested = NO;
++  }
++  return self;
+ }
+ 
+-RCT_EXPORT_METHOD(startAdvertising:(NSDictionary *)options) {
+-    if (self.peripheralManager.state != CBManagerStatePoweredOn) {
+-        return;
+-    }
+-    
+-    NSMutableDictionary *advertisingData = [NSMutableDictionary dictionary];
+-    
+-    // Handle legacy options for backward compatibility
+-    NSString *localName = options[@"localName"];
+-    NSArray *serviceUUIDs = options[@"serviceUUIDs"];
+-    NSString *manufacturerData = options[@"manufacturerData"];
+-    
+-    // Process comprehensive advertising data
+-    NSDictionary *advertisingDataDict = options[@"advertisingData"];
+-    if ([advertisingDataDict isKindOfClass:[NSDictionary class]]) {
+-        [self processAdvertisingData:advertisingDataDict into:advertisingData];
++- (NSArray<NSString *> *)supportedEvents {
++  return @[
++    kCharacteristicWriteReceivedEvent,
++    kCentralConnectionStateChangedEvent,
++    kCharacteristicSubscriptionChangedEvent
++  ];
++}
++
++- (void)startObserving {
++  self.hasListeners = YES;
++}
++
++- (void)stopObserving {
++  self.hasListeners = NO;
++}
++
++- (dispatch_queue_t)methodQueue {
++  return dispatch_get_main_queue();
++}
++
++- (void)emitEvent:(NSString *)eventName payload:(NSDictionary *)payload {
++  if (!self.hasListeners) {
++    return;
++  }
++
++  [self sendEventWithName:eventName body:payload];
++}
++
++- (NSString *)characteristicKeyForServiceUUID:(NSString *)serviceUUID
++                           characteristicUUID:(NSString *)characteristicUUID {
++  return [NSString stringWithFormat:@"%@|%@", serviceUUID.lowercaseString, characteristicUUID.lowercaseString];
++}
++
++- (CBMutableCharacteristic *)findMutableCharacteristicForServiceUUID:(NSString *)serviceUUID
++                                                  characteristicUUID:(NSString *)characteristicUUID {
++  for (CBMutableService *service in self.services) {
++    if (![service.UUID.UUIDString.lowercaseString isEqualToString:serviceUUID.lowercaseString]) {
++      continue;
+     }
+-    
+-    // Legacy support - override with legacy options if provided
+-    if ([localName isKindOfClass:[NSString class]]) {
+-        advertisingData[CBAdvertisementDataLocalNameKey] = localName;
++
++    for (CBCharacteristic *characteristic in service.characteristics ?: @[]) {
++      if ([characteristic.UUID.UUIDString.lowercaseString
++              isEqualToString:characteristicUUID.lowercaseString]) {
++        return (CBMutableCharacteristic *)characteristic;
++      }
+     }
+-    if ([serviceUUIDs isKindOfClass:[NSArray class]] && serviceUUIDs.count > 0) {
+-        NSMutableArray *uuids = [NSMutableArray array];
+-        for (NSString *uuidStr in serviceUUIDs) {
+-            if ([uuidStr isKindOfClass:[NSString class]]) {
+-                [uuids addObject:[CBUUID UUIDWithString:uuidStr]];
+-            }
+-        }
+-        advertisingData[CBAdvertisementDataServiceUUIDsKey] = uuids;
++  }
++
++  return nil;
++}
++
++- (NSMutableArray<CBCentral *> *)subscribedCentralsForKey:(NSString *)key create:(BOOL)create {
++  NSMutableArray<CBCentral *> *centrals = self.subscribedCentrals[key];
++
++  if (!centrals && create) {
++    centrals = [NSMutableArray array];
++    self.subscribedCentrals[key] = centrals;
++  }
++
++  return centrals;
++}
++
++- (void)applyConfiguredServicesIfPossible {
++  if (self.peripheralManager.state != CBManagerStatePoweredOn || self.servicesApplied) {
++    return;
++  }
++
++  [self.peripheralManager removeAllServices];
++  for (CBMutableService *service in self.services) {
++    [self.peripheralManager addService:service];
++  }
++
++  self.servicesApplied = YES;
++}
++
++- (void)resumeAdvertisingIfPossible {
++  if (self.peripheralManager.state != CBManagerStatePoweredOn || !self.advertisingRequested) {
++    return;
++  }
++
++  if (self.currentAdvertisingData.count == 0) {
++    return;
++  }
++
++  [self.peripheralManager stopAdvertising];
++  [self.peripheralManager startAdvertising:self.currentAdvertisingData];
++}
++
++RCT_EXPORT_METHOD(startAdvertising:(NSDictionary *)options) {
++  NSMutableDictionary *advertisingData = [NSMutableDictionary dictionary];
++
++  NSString *localName = options[@"localName"];
++  NSArray *serviceUUIDs = options[@"serviceUUIDs"];
++  NSString *manufacturerData = options[@"manufacturerData"];
++
++  NSDictionary *advertisingDataDict = options[@"advertisingData"];
++  if ([advertisingDataDict isKindOfClass:[NSDictionary class]]) {
++    [self processAdvertisingData:advertisingDataDict into:advertisingData];
++  }
++
++  if ([localName isKindOfClass:[NSString class]]) {
++    advertisingData[CBAdvertisementDataLocalNameKey] = localName;
++  }
++
++  if ([serviceUUIDs isKindOfClass:[NSArray class]] && serviceUUIDs.count > 0) {
++    NSMutableArray *uuids = [NSMutableArray array];
++    for (NSString *uuidStr in serviceUUIDs) {
++      if ([uuidStr isKindOfClass:[NSString class]]) {
++        [uuids addObject:[CBUUID UUIDWithString:uuidStr]];
++      }
+     }
+-    if ([manufacturerData isKindOfClass:[NSString class]]) {
+-        NSData *data = [self hexStringToData:manufacturerData];
+-        if (data) {
+-            advertisingData[CBAdvertisementDataManufacturerDataKey] = data;
+-        }
++    advertisingData[CBAdvertisementDataServiceUUIDsKey] = uuids;
++  }
++
++  if ([manufacturerData isKindOfClass:[NSString class]]) {
++    NSData *data = [self hexStringToData:manufacturerData];
++    if (data) {
++      advertisingData[CBAdvertisementDataManufacturerDataKey] = data;
+     }
+-    
+-    self.currentAdvertisingData = [advertisingData copy];
+-    [self.peripheralManager startAdvertising:advertisingData];
++  }
++
++  self.currentAdvertisingData = [advertisingData copy];
++  self.advertisingRequested = YES;
++  [self applyConfiguredServicesIfPossible];
++  [self resumeAdvertisingIfPossible];
+ }
+ 
+ RCT_EXPORT_METHOD(updateAdvertisingData:(NSDictionary *)advertisingDataDict) {
+-    if (self.peripheralManager.state != CBManagerStatePoweredOn) {
+-        return;
+-    }
+-    
+-    [self.peripheralManager stopAdvertising];
+-    
+-    NSMutableDictionary *advertisingData = [NSMutableDictionary dictionary];
+-    [self processAdvertisingData:advertisingDataDict into:advertisingData];
+-    
+-    self.currentAdvertisingData = [advertisingData copy];
+-    [self.peripheralManager startAdvertising:advertisingData];
++  NSMutableDictionary *advertisingData = [NSMutableDictionary dictionary];
++  [self processAdvertisingData:advertisingDataDict into:advertisingData];
++
++  self.currentAdvertisingData = [advertisingData copy];
++  self.advertisingRequested = YES;
++  [self resumeAdvertisingIfPossible];
+ }
+ 
+ RCT_EXPORT_METHOD(getAdvertisingData:(RCTPromiseResolveBlock)resolve
+                   rejecter:(RCTPromiseRejectBlock)reject) {
+-    resolve(self.currentAdvertisingData ?: @{});
++  resolve(self.currentAdvertisingData ?: @{});
+ }
+ 
+ - (void)processAdvertisingData:(NSDictionary *)dataDict into:(NSMutableDictionary *)advertisingData {
+-    // 0x01 - Flags (partial support)
+-    if (dataDict[@"flags"]) {
+-        NSNumber *flags = dataDict[@"flags"];
+-        if ([flags isKindOfClass:[NSNumber class]]) {
+-            // iOS Core Bluetooth handles most flags automatically
+-            // The connectable flag is controlled by CBAdvertisementDataIsConnectable
+-            BOOL isConnectable = (flags.intValue & 0x02) != 0;
+-            advertisingData[CBAdvertisementDataIsConnectable] = @(isConnectable);
+-        }
+-    }
+-    
+-    // 0x02-0x07 - Service UUIDs (fully supported)
+-    [self addServiceUUIDs:dataDict[@"incompleteServiceUUIDs16"] to:advertisingData key:CBAdvertisementDataServiceUUIDsKey];
+-    [self addServiceUUIDs:dataDict[@"completeServiceUUIDs16"] to:advertisingData key:CBAdvertisementDataServiceUUIDsKey];
+-    [self addServiceUUIDs:dataDict[@"incompleteServiceUUIDs32"] to:advertisingData key:CBAdvertisementDataServiceUUIDsKey];
+-    [self addServiceUUIDs:dataDict[@"completeServiceUUIDs32"] to:advertisingData key:CBAdvertisementDataServiceUUIDsKey];
+-    [self addServiceUUIDs:dataDict[@"incompleteServiceUUIDs128"] to:advertisingData key:CBAdvertisementDataServiceUUIDsKey];
+-    [self addServiceUUIDs:dataDict[@"completeServiceUUIDs128"] to:advertisingData key:CBAdvertisementDataServiceUUIDsKey];
+-    
+-    // 0x08-0x09 - Local Name (fully supported)
+-    if (dataDict[@"shortenedLocalName"]) {
+-        advertisingData[CBAdvertisementDataLocalNameKey] = dataDict[@"shortenedLocalName"];
++  if (dataDict[@"flags"]) {
++    NSNumber *flags = dataDict[@"flags"];
++    if ([flags isKindOfClass:[NSNumber class]]) {
++      BOOL isConnectable = (flags.intValue & 0x02) != 0;
++      advertisingData[CBAdvertisementDataIsConnectable] = @(isConnectable);
+     }
+-    if (dataDict[@"completeLocalName"]) {
+-        advertisingData[CBAdvertisementDataLocalNameKey] = dataDict[@"completeLocalName"];
+-    }
+-    
+-    // 0x0A - Tx Power Level (fully supported)
+-    if (dataDict[@"txPowerLevel"]) {
+-        NSNumber *txPower = dataDict[@"txPowerLevel"];
+-        if ([txPower isKindOfClass:[NSNumber class]]) {
+-            advertisingData[CBAdvertisementDataTxPowerLevelKey] = txPower;
+-        }
+-    }
+-    
+-    // 0x14-0x15 - Service Solicitation UUIDs (fully supported)
+-    [self addServiceUUIDs:dataDict[@"serviceSolicitationUUIDs16"] to:advertisingData key:CBAdvertisementDataSolicitedServiceUUIDsKey];
+-    [self addServiceUUIDs:dataDict[@"serviceSolicitationUUIDs128"] to:advertisingData key:CBAdvertisementDataSolicitedServiceUUIDsKey];
+-    
+-    // 0x16, 0x20, 0x21 - Service Data (fully supported)
+-    [self addServiceData:dataDict[@"serviceData16"] to:advertisingData];
+-    [self addServiceData:dataDict[@"serviceData32"] to:advertisingData];
+-    [self addServiceData:dataDict[@"serviceData128"] to:advertisingData];
+-    
+-    // 0x19 - Appearance (partial support)
+-    if (dataDict[@"appearance"]) {
+-        NSNumber *appearance = dataDict[@"appearance"];
+-        if ([appearance isKindOfClass:[NSNumber class]]) {
+-            // iOS doesn't have direct CBAdvertisementData support for appearance
+-            // We can include it as custom service data if needed
+-            NSData *appearanceData = [NSData dataWithBytes:(uint8_t[]){(uint8_t)(appearance.intValue & 0xFF), (uint8_t)((appearance.intValue >> 8) & 0xFF)} length:2];
+-            // Store with Generic Access service UUID
+-            advertisingData[[CBUUID UUIDWithString:@"1800"]] = appearanceData;
+-        }
++  }
++
++  [self addServiceUUIDs:dataDict[@"incompleteServiceUUIDs16"]
++                     to:advertisingData
++                    key:CBAdvertisementDataServiceUUIDsKey];
++  [self addServiceUUIDs:dataDict[@"completeServiceUUIDs16"]
++                     to:advertisingData
++                    key:CBAdvertisementDataServiceUUIDsKey];
++  [self addServiceUUIDs:dataDict[@"incompleteServiceUUIDs32"]
++                     to:advertisingData
++                    key:CBAdvertisementDataServiceUUIDsKey];
++  [self addServiceUUIDs:dataDict[@"completeServiceUUIDs32"]
++                     to:advertisingData
++                    key:CBAdvertisementDataServiceUUIDsKey];
++  [self addServiceUUIDs:dataDict[@"incompleteServiceUUIDs128"]
++                     to:advertisingData
++                    key:CBAdvertisementDataServiceUUIDsKey];
++  [self addServiceUUIDs:dataDict[@"completeServiceUUIDs128"]
++                     to:advertisingData
++                    key:CBAdvertisementDataServiceUUIDsKey];
++
++  if (dataDict[@"shortenedLocalName"]) {
++    advertisingData[CBAdvertisementDataLocalNameKey] = dataDict[@"shortenedLocalName"];
++  }
++  if (dataDict[@"completeLocalName"]) {
++    advertisingData[CBAdvertisementDataLocalNameKey] = dataDict[@"completeLocalName"];
++  }
++
++  if (dataDict[@"txPowerLevel"]) {
++    NSNumber *txPower = dataDict[@"txPowerLevel"];
++    if ([txPower isKindOfClass:[NSNumber class]]) {
++      advertisingData[CBAdvertisementDataTxPowerLevelKey] = txPower;
+     }
+-    
+-    // 0x1F - Service Solicitation (32-bit) (fully supported)
+-    [self addServiceUUIDs:dataDict[@"serviceSolicitationUUIDs32"] to:advertisingData key:CBAdvertisementDataSolicitedServiceUUIDsKey];
+-    
+-    // 0xFF - Manufacturer Specific Data (fully supported)
+-    if (dataDict[@"manufacturerData"]) {
+-        NSData *manufacturerData = [self hexStringToData:dataDict[@"manufacturerData"]];
+-        if (manufacturerData) {
+-            advertisingData[CBAdvertisementDataManufacturerDataKey] = manufacturerData;
+-        }
++  }
++
++  [self addServiceUUIDs:dataDict[@"serviceSolicitationUUIDs16"]
++                     to:advertisingData
++                    key:CBAdvertisementDataSolicitedServiceUUIDsKey];
++  [self addServiceUUIDs:dataDict[@"serviceSolicitationUUIDs128"]
++                     to:advertisingData
++                    key:CBAdvertisementDataSolicitedServiceUUIDsKey];
++
++  [self addServiceData:dataDict[@"serviceData16"] to:advertisingData];
++  [self addServiceData:dataDict[@"serviceData32"] to:advertisingData];
++  [self addServiceData:dataDict[@"serviceData128"] to:advertisingData];
++
++  [self addServiceUUIDs:dataDict[@"serviceSolicitationUUIDs32"]
++                     to:advertisingData
++                    key:CBAdvertisementDataSolicitedServiceUUIDsKey];
++
++  if (dataDict[@"manufacturerData"]) {
++    NSData *manufacturerData = [self hexStringToData:dataDict[@"manufacturerData"]];
++    if (manufacturerData) {
++      advertisingData[CBAdvertisementDataManufacturerDataKey] = manufacturerData;
+     }
++  }
+ }
+ 
+ - (void)addServiceUUIDs:(id)uuids to:(NSMutableDictionary *)advertisingData key:(NSString *)key {
+-    if ([uuids isKindOfClass:[NSArray class]]) {
+-        NSMutableArray *uuidArray = [NSMutableArray array];
+-        for (NSString *uuidStr in uuids) {
+-            if ([uuidStr isKindOfClass:[NSString class]]) {
+-                [uuidArray addObject:[CBUUID UUIDWithString:uuidStr]];
+-            }
+-        }
+-        if (uuidArray.count > 0) {
+-            advertisingData[key] = uuidArray;
+-        }
++  if ([uuids isKindOfClass:[NSArray class]]) {
++    NSMutableArray *uuidArray = [NSMutableArray array];
++    for (NSString *uuidStr in uuids) {
++      if ([uuidStr isKindOfClass:[NSString class]]) {
++        [uuidArray addObject:[CBUUID UUIDWithString:uuidStr]];
++      }
++    }
++    if (uuidArray.count > 0) {
++      advertisingData[key] = uuidArray;
+     }
++  }
+ }
+ 
+ - (void)addServiceData:(id)serviceDataArray to:(NSMutableDictionary *)advertisingData {
+-    if ([serviceDataArray isKindOfClass:[NSArray class]]) {
+-        for (NSDictionary *serviceData in serviceDataArray) {
+-            if ([serviceData isKindOfClass:[NSDictionary class]]) {
+-                NSString *uuid = serviceData[@"uuid"];
+-                NSString *data = serviceData[@"data"];
+-                if ([uuid isKindOfClass:[NSString class]] && [data isKindOfClass:[NSString class]]) {
+-                    NSData *dataBytes = [self hexStringToData:data];
+-                    if (dataBytes) {
+-                        advertisingData[uuid] = dataBytes;
+-                    }
+-                }
+-            }
+-        }
++  if (![serviceDataArray isKindOfClass:[NSArray class]]) {
++    return;
++  }
++
++  NSMutableDictionary<CBUUID *, NSData *> *serviceDataDictionary =
++    [NSMutableDictionary dictionaryWithDictionary:advertisingData[CBAdvertisementDataServiceDataKey] ?: @{}];
++
++  for (NSDictionary *serviceData in serviceDataArray) {
++    if (![serviceData isKindOfClass:[NSDictionary class]]) {
++      continue;
+     }
+-}
+ 
+-- (NSData *)hexStringToData:(NSString *)hexString {
+-    if (![hexString isKindOfClass:[NSString class]]) {
+-        return nil;
++    NSString *uuid = serviceData[@"uuid"];
++    NSString *data = serviceData[@"data"];
++    if (![uuid isKindOfClass:[NSString class]] || ![data isKindOfClass:[NSString class]]) {
++      continue;
+     }
+-    
+-    NSString *cleanHex = [hexString stringByReplacingOccurrencesOfString:@" " withString:@""];
+-    if (cleanHex.length % 2 != 0) {
+-        return nil;
++
++    NSData *dataBytes = [self hexStringToData:data];
++    if (!dataBytes) {
++      continue;
+     }
+-    
+-    NSMutableData *data = [NSMutableData data];
+-    for (int i = 0; i < cleanHex.length; i += 2) {
+-        NSString *byteString = [cleanHex substringWithRange:NSMakeRange(i, 2)];
+-        unsigned int byte;
+-        NSScanner *scanner = [NSScanner scannerWithString:byteString];
+-        if ([scanner scanHexInt:&byte]) {
+-            uint8_t byteValue = (uint8_t)byte;
+-            [data appendBytes:&byteValue length:1];
+-        }
++
++    serviceDataDictionary[[CBUUID UUIDWithString:uuid]] = dataBytes;
++  }
++
++  if (serviceDataDictionary.count > 0) {
++    advertisingData[CBAdvertisementDataServiceDataKey] = serviceDataDictionary;
++  }
++}
++
++- (NSData *)hexStringToData:(NSString *)hexString {
++  if (![hexString isKindOfClass:[NSString class]]) {
++    return nil;
++  }
++
++  NSString *cleanHex = [hexString stringByReplacingOccurrencesOfString:@" " withString:@""];
++  if (cleanHex.length % 2 != 0) {
++    return nil;
++  }
++
++  NSMutableData *data = [NSMutableData data];
++  for (NSUInteger index = 0; index < cleanHex.length; index += 2) {
++    NSString *byteString = [cleanHex substringWithRange:NSMakeRange(index, 2)];
++    unsigned int byteValue = 0;
++    NSScanner *scanner = [NSScanner scannerWithString:byteString];
++    if ([scanner scanHexInt:&byteValue]) {
++      uint8_t byte = (uint8_t)byteValue;
++      [data appendBytes:&byte length:1];
+     }
+-    return data;
++  }
++  return data;
+ }
+ 
+ RCT_EXPORT_METHOD(stopAdvertising) {
+-    [self.peripheralManager stopAdvertising];
++  self.advertisingRequested = NO;
++  [self.peripheralManager stopAdvertising];
+ }
+ 
+ RCT_EXPORT_METHOD(setServices:(NSArray *)services) {
+-    [self.services removeAllObjects];
+-    for (NSDictionary *serviceDict in services) {
+-        if (![serviceDict isKindOfClass:[NSDictionary class]]) continue;
+-        NSString *uuid = serviceDict[@"uuid"];
+-        if (![uuid isKindOfClass:[NSString class]]) continue;
+-        CBMutableService *service = [[CBMutableService alloc] initWithType:[CBUUID UUIDWithString:uuid] primary:YES];
+-        NSMutableArray *characteristics = [NSMutableArray array];
+-        NSArray *charArray = serviceDict[@"characteristics"];
+-        if (![charArray isKindOfClass:[NSArray class]]) charArray = @[];
+-        for (NSDictionary *charDict in charArray) {
+-            if (![charDict isKindOfClass:[NSDictionary class]]) continue;
+-            NSString *charUUID = charDict[@"uuid"];
+-            NSArray *propertiesArr = charDict[@"properties"];
+-            CBCharacteristicProperties properties = 0;
+-            if ([propertiesArr isKindOfClass:[NSArray class]]) {
+-                for (NSString *prop in propertiesArr) {
+-                    if (![prop isKindOfClass:[NSString class]]) continue;
+-                    if ([prop isEqualToString:@"read"]) properties |= CBCharacteristicPropertyRead;
+-                    if ([prop isEqualToString:@"write"]) properties |= CBCharacteristicPropertyWrite;
+-                    if ([prop isEqualToString:@"notify"]) properties |= CBCharacteristicPropertyNotify;
+-                    if ([prop isEqualToString:@"indicate"]) properties |= CBCharacteristicPropertyIndicate;
+-                }
+-            }
+-            NSData *value = nil;
+-            if ([charDict[@"value"] isKindOfClass:[NSString class]]) {
+-                value = [charDict[@"value"] dataUsingEncoding:NSUTF8StringEncoding];
+-                properties = CBCharacteristicPropertyRead;
+-            }
+-            CBAttributePermissions permissions = CBAttributePermissionsReadable|CBAttributePermissionsWriteable;
+-            if (value) {
+-                permissions = CBAttributePermissionsReadable;
+-            }
+-            if ([charUUID isKindOfClass:[NSString class]]) {
+-                CBMutableCharacteristic *characteristic = [[CBMutableCharacteristic alloc] initWithType:[CBUUID UUIDWithString:charUUID] properties:properties value:value permissions:permissions];
+-                [characteristics addObject:characteristic];
+-            }
++  [self.services removeAllObjects];
++  [self.subscribedCentrals removeAllObjects];
++  self.servicesApplied = NO;
++
++  for (NSDictionary *serviceDict in services) {
++    if (![serviceDict isKindOfClass:[NSDictionary class]]) continue;
++
++    NSString *uuid = serviceDict[@"uuid"];
++    if (![uuid isKindOfClass:[NSString class]]) continue;
++
++    CBMutableService *service =
++      [[CBMutableService alloc] initWithType:[CBUUID UUIDWithString:uuid] primary:YES];
++    NSMutableArray *characteristics = [NSMutableArray array];
++    NSArray *charArray = serviceDict[@"characteristics"];
++    if (![charArray isKindOfClass:[NSArray class]]) charArray = @[];
++
++    for (NSDictionary *charDict in charArray) {
++      if (![charDict isKindOfClass:[NSDictionary class]]) continue;
++
++      NSString *charUUID = charDict[@"uuid"];
++      NSArray *propertiesArr = charDict[@"properties"];
++      CBCharacteristicProperties properties = 0;
++      if ([propertiesArr isKindOfClass:[NSArray class]]) {
++        for (NSString *prop in propertiesArr) {
++          if (![prop isKindOfClass:[NSString class]]) continue;
++          if ([prop isEqualToString:@"read"]) properties |= CBCharacteristicPropertyRead;
++          if ([prop isEqualToString:@"write"]) properties |= CBCharacteristicPropertyWrite;
++          if ([prop isEqualToString:@"notify"]) properties |= CBCharacteristicPropertyNotify;
++          if ([prop isEqualToString:@"indicate"]) properties |= CBCharacteristicPropertyIndicate;
+         }
+-        service.characteristics = characteristics;
+-        [self.services addObject:service];
+-    }
+-    [self.peripheralManager removeAllServices];
+-    for (CBMutableService *service in self.services) {
+-        [self.peripheralManager addService:service];
++      }
++
++      NSData *value = nil;
++      if ([charDict[@"value"] isKindOfClass:[NSString class]]) {
++        value = [charDict[@"value"] dataUsingEncoding:NSUTF8StringEncoding];
++        if (properties == 0) {
++          properties |= CBCharacteristicPropertyRead;
++        }
++      }
++
++      CBAttributePermissions permissions =
++        CBAttributePermissionsReadable | CBAttributePermissionsWriteable;
++
++      if ([charUUID isKindOfClass:[NSString class]]) {
++        CBMutableCharacteristic *characteristic =
++          [[CBMutableCharacteristic alloc]
++            initWithType:[CBUUID UUIDWithString:charUUID]
++              properties:properties
++                   value:value
++             permissions:permissions];
++        [characteristics addObject:characteristic];
++      }
+     }
++
++    service.characteristics = characteristics;
++    [self.services addObject:service];
++  }
++
++  [self applyConfiguredServicesIfPossible];
++  [self resumeAdvertisingIfPossible];
++}
++
++RCT_EXPORT_METHOD(updateCharacteristicValue:(NSString *)serviceUuid
++                  characteristicUuid:(NSString *)characteristicUuid
++                  value:(NSString *)value
++                  notify:(BOOL)notify) {
++  if (![serviceUuid isKindOfClass:[NSString class]] ||
++      ![characteristicUuid isKindOfClass:[NSString class]]) {
++    return;
++  }
++
++  CBMutableCharacteristic *characteristic =
++    [self findMutableCharacteristicForServiceUUID:serviceUuid
++                               characteristicUUID:characteristicUuid];
++
++  if (!characteristic) {
++    return;
++  }
++
++  NSData *nextValue = [(value ?: @"") dataUsingEncoding:NSUTF8StringEncoding];
++  characteristic.value = nextValue;
++
++  if (!notify) {
++    return;
++  }
++
++  NSString *key = [self characteristicKeyForServiceUUID:serviceUuid
++                                     characteristicUUID:characteristicUuid];
++  NSArray<CBCentral *> *subscribed = [[self subscribedCentralsForKey:key create:NO] copy];
++  [self.peripheralManager updateValue:nextValue
++                    forCharacteristic:characteristic
++                 onSubscribedCentrals:subscribed.count > 0 ? subscribed : nil];
+ }
+ 
+-// Add stubs for required CBPeripheralManagerDelegate methods
+ - (void)peripheralManagerDidUpdateState:(CBPeripheralManager *)peripheral {
+-    // Required delegate method. Add logic if needed.
++  if (peripheral.state == CBManagerStatePoweredOn) {
++    [self applyConfiguredServicesIfPossible];
++    [self resumeAdvertisingIfPossible];
++  }
++}
++
++- (void)peripheralManager:(CBPeripheralManager *)peripheral
++    didReceiveWriteRequests:(NSArray<CBATTRequest *> *)requests {
++  for (CBATTRequest *request in requests) {
++    NSData *value = request.value ?: [NSData data];
++    NSString *serviceUuid = request.characteristic.service.UUID.UUIDString ?: @"";
++    NSString *characteristicUuid = request.characteristic.UUID.UUIDString ?: @"";
++    CBMutableCharacteristic *characteristic =
++      [self findMutableCharacteristicForServiceUUID:serviceUuid
++                                 characteristicUUID:characteristicUuid];
++    if (characteristic) {
++      characteristic.value = value;
++    }
++
++    NSString *decodedValue =
++      [[NSString alloc] initWithData:value encoding:NSUTF8StringEncoding] ?: @"";
++
++    [self emitEvent:kCharacteristicWriteReceivedEvent
++            payload:@{
++              @"deviceId": request.central.identifier.UUIDString ?: @"unknown",
++              @"serviceUuid": serviceUuid,
++              @"characteristicUuid": characteristicUuid,
++              @"value": decodedValue,
++            }];
++
++    [self.peripheralManager respondToRequest:request withResult:CBATTErrorSuccess];
++  }
++}
++
++- (void)peripheralManager:(CBPeripheralManager *)peripheral
++    central:(CBCentral *)central
++    didSubscribeToCharacteristic:(CBCharacteristic *)characteristic {
++  NSString *serviceUuid = characteristic.service.UUID.UUIDString ?: @"";
++  NSString *characteristicUuid = characteristic.UUID.UUIDString ?: @"";
++  NSString *key =
++    [self characteristicKeyForServiceUUID:serviceUuid characteristicUUID:characteristicUuid];
++  NSMutableArray<CBCentral *> *centrals = [self subscribedCentralsForKey:key create:YES];
++
++  BOOL alreadyPresent = NO;
++  for (CBCentral *existingCentral in centrals) {
++    if ([existingCentral.identifier isEqual:central.identifier]) {
++      alreadyPresent = YES;
++      break;
++    }
++  }
++  if (!alreadyPresent) {
++    [centrals addObject:central];
++  }
++
++  [self emitEvent:kCharacteristicSubscriptionChangedEvent
++          payload:@{
++            @"deviceId": central.identifier.UUIDString ?: @"unknown",
++            @"serviceUuid": serviceUuid,
++            @"characteristicUuid": characteristicUuid,
++            @"subscribed": @YES,
++          }];
++  [self emitEvent:kCentralConnectionStateChangedEvent
++          payload:@{
++            @"deviceId": central.identifier.UUIDString ?: @"unknown",
++            @"state": @"connected",
++          }];
++}
++
++- (void)peripheralManager:(CBPeripheralManager *)peripheral
++    central:(CBCentral *)central
++    didUnsubscribeFromCharacteristic:(CBCharacteristic *)characteristic {
++  NSString *serviceUuid = characteristic.service.UUID.UUIDString ?: @"";
++  NSString *characteristicUuid = characteristic.UUID.UUIDString ?: @"";
++  NSString *key =
++    [self characteristicKeyForServiceUUID:serviceUuid characteristicUUID:characteristicUuid];
++  NSMutableArray<CBCentral *> *centrals = [self subscribedCentralsForKey:key create:NO];
++
++  NSUInteger indexToRemove = NSNotFound;
++  for (NSUInteger index = 0; index < centrals.count; index += 1) {
++    if ([centrals[index].identifier isEqual:central.identifier]) {
++      indexToRemove = index;
++      break;
++    }
++  }
++  if (indexToRemove != NSNotFound) {
++    [centrals removeObjectAtIndex:indexToRemove];
++  }
++
++  [self emitEvent:kCharacteristicSubscriptionChangedEvent
++          payload:@{
++            @"deviceId": central.identifier.UUIDString ?: @"unknown",
++            @"serviceUuid": serviceUuid,
++            @"characteristicUuid": characteristicUuid,
++            @"subscribed": @NO,
++          }];
++  [self emitEvent:kCentralConnectionStateChangedEvent
++          payload:@{
++            @"deviceId": central.identifier.UUIDString ?: @"unknown",
++            @"state": @"disconnected",
++          }];
+ }
+ 
+ @end

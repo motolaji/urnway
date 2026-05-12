@@ -1317,12 +1317,7 @@ export default function PayScreen() {
                     </Pressable>
 
                     <Pressable
-                      onPress={() =>
-                        router.push({
-                          pathname: "/payments/nearby",
-                          params: { slug: link.slug },
-                        })
-                      }
+                      onPress={() => router.push("/payments/nearby")}
                       style={styles.secondaryButton}
                     >
                       <Text style={styles.secondaryButtonText}>Nearby</Text>
@@ -1372,8 +1367,8 @@ export default function PayScreen() {
       <View style={styles.card}>
         <Text style={styles.sectionTitle}>Coming next</Text>
         <Text style={styles.bodyText}>
-          Nearby discovery and camera-based QR scanning build on top of this same
-          payments foundation.
+          Nearby payments now use Bluetooth discovery between signed-in Urnway
+          users on the same screen-scoped flow.
         </Text>
       </View>
     </BlurScrollScreen>

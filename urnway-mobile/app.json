@@ -12,10 +12,11 @@
       "supportsTablet": true,
       "infoPlist": {
         "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true,
           "NSAllowsArbitraryLoadsInWebContent": true
         },
-        "NSBluetoothAlwaysUsageDescription": "Allow Urnway to discover and share nearby payment requests.",
-        "NSBluetoothPeripheralUsageDescription": "Allow Urnway to broadcast nearby payment requests."
+        "NSBluetoothAlwaysUsageDescription": "Allow Urnway to discover nearby users and exchange nearby payment messages.",
+        "NSBluetoothPeripheralUsageDescription": "Allow Urnway to make your profile discoverable for nearby payments."
       },
       "bundleIdentifier": "com.motolaji.urnway-mobile"
     },
@@ -70,7 +71,7 @@
         {
           "modes": ["central", "peripheral"],
           "neverForLocation": true,
-          "bluetoothAlwaysPermission": "Allow Urnway to discover nearby payments."
+          "bluetoothAlwaysPermission": "Allow Urnway to discover nearby users and exchange nearby payment messages."
         }
       ]
     ],

@@ -14,5 +14,8 @@
     "lint": "npm run lint --workspaces --if-present",
     "db:push": "npm --workspace urnway-api run db:push",
     "db:studio": "npm --workspace urnway-api run db:studio"
+  },
+  "devDependencies": {
+    "patch-package": "^8.0.1"
   }
 }

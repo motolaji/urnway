@@ -2,6 +2,8 @@ import type { RequestHandler } from 'express';
 
 import { fail, ok } from '../../utils/api-response.js';
 import {
+  completeNearbyPaymentIntentSchema,
+  createNearbyPaymentIntentSchema,
   createPaymentQrSchema,
   createPaymentLinkSchema,
   resetPaymentLinkSchema,
@@ -9,9 +11,12 @@ import {
   submitPaymentLinkSchema,
 } from './payments.schema.js';
 import {
-  generatePaymentQr,
+  completeNearbyPaymentIntent,
+  createNearbyPaymentIntent,
   createPaymentLink,
   deleteUserPaymentLink,
+  generatePaymentQr,
+  getNearbyPaymentIntent,
   getPublicPaymentQr,
   getPaymentsOverview,
   getPublicPaymentLink,
@@ -151,6 +156,59 @@ export const preflightDirectSendHandler: RequestHandler = (req, res) => {
 
     return Promise.resolve(
       preflightDirectSendPayment(getUserFromRequest(req), input)
+    ).then((data) => {
+      res.json(ok(data));
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Authenticated user missing from request') {
+      res.status(401).json(fail(error.message));
+      return;
+    }
+
+    throw error;
+  }
+};
+
+export const createNearbyPaymentIntentHandler: RequestHandler = (req, res) => {
+  try {
+    const input = createNearbyPaymentIntentSchema.parse(req.body);
+
+    return Promise.resolve(
+      createNearbyPaymentIntent(getUserFromRequest(req), input)
+    ).then((data) => {
+      res.status(201).json(ok(data));
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Authenticated user missing from request') {
+      res.status(401).json(fail(error.message));
+      return;
+    }
+
+    throw error;
+  }
+};
+
+export const getNearbyPaymentIntentHandler: RequestHandler = (req, res) => {
+  try {
+    return Promise.resolve(
+      getNearbyPaymentIntent(getUserFromRequest(req), readRouteParam(req.params.intentId))
+    ).then((data) => {
+      res.json(ok(data));
+    });
+  } catch (error) {
+    res.status(401).json(fail(error instanceof Error ? error.message : 'Unauthorized'));
+  }
+};
+
+export const completeNearbyPaymentIntentHandler: RequestHandler = (req, res) => {
+  try {
+    completeNearbyPaymentIntentSchema.parse(req.body ?? {});
+
+    return Promise.resolve(
+      completeNearbyPaymentIntent(
+        getUserFromRequest(req),
+        readRouteParam(req.params.intentId)
+      )
     ).then((data) => {
       res.json(ok(data));
     });

@@ -110,6 +110,9 @@ what the user does with MUSD next.
 - [x] Show owner-only reset action for stale payment links
 - [ ] Build escrow status and cancel UI
 - [x] Build nearby payments entry point
+- [x] Build nearby discoverable send flow with BLE user discovery
+- [x] Show incoming nearby PAY state and ACK/DONE verification states
+- [x] Clean up nearby scanning, advertising, subscriptions, and connections on exit
 - [ ] Build contacts send flow
 
 ### Device capabilities and edge cases

@@ -110,6 +110,14 @@ export default function RootLayout() {
               options={{ headerShown: false }}
             />
             <Stack.Screen
+              name="trips/search-results"
+              options={{ headerShown: false }}
+            />
+            <Stack.Screen
+              name="trips/booking-details"
+              options={{ headerShown: false }}
+            />
+            <Stack.Screen
               name="modal"
               options={{ presentation: "modal", title: "Modal" }}
             />

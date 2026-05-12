@@ -1,7 +1,11 @@
 import { and, desc, eq, inArray } from 'drizzle-orm';
 
 import { db } from '../../db/client.js';
-import { paymentLinkAttempts, paymentLinks } from '../../db/schema.js';
+import {
+  nearbyPaymentIntents,
+  paymentLinkAttempts,
+  paymentLinks,
+} from '../../db/schema.js';
 
 type CreatePaymentLinkRecordInput = {
   userId: string;
@@ -32,6 +36,24 @@ type CreatePaymentLinkAttemptRecordInput = {
 type UpdatePaymentLinkAttemptRecordInput = Partial<{
   status: string;
   confirmedAt: Date | null;
+}>;
+
+type CreateNearbyPaymentIntentRecordInput = {
+  intentId: string;
+  senderUserId: string;
+  receiverUserId: string;
+  senderUsername: string;
+  receiverPublicUserId: string;
+  amountMinor: number;
+  currency: string;
+  status?: string;
+  expiresAt?: Date | null;
+};
+
+type UpdateNearbyPaymentIntentRecordInput = Partial<{
+  status: string;
+  completedAt: Date | null;
+  expiresAt: Date | null;
 }>;
 
 export async function createPaymentLinkRecord(input: CreatePaymentLinkRecordInput) {
@@ -175,4 +197,51 @@ export async function markSubmittedAttemptsStaleForPaymentLink(paymentLinkId: st
       )
     )
     .returning();
+}
+
+export async function createNearbyPaymentIntentRecord(
+  input: CreateNearbyPaymentIntentRecordInput
+) {
+  const [nearbyPaymentIntent] = await db
+    .insert(nearbyPaymentIntents)
+    .values({
+      intentId: input.intentId,
+      senderUserId: input.senderUserId,
+      receiverUserId: input.receiverUserId,
+      senderUsername: input.senderUsername,
+      receiverPublicUserId: input.receiverPublicUserId,
+      amountMinor: input.amountMinor,
+      currency: input.currency,
+      status: input.status ?? 'created',
+      expiresAt: input.expiresAt ?? null,
+    })
+    .returning();
+
+  return nearbyPaymentIntent;
+}
+
+export async function findNearbyPaymentIntentByIntentId(intentId: string) {
+  const [nearbyPaymentIntent] = await db
+    .select()
+    .from(nearbyPaymentIntents)
+    .where(eq(nearbyPaymentIntents.intentId, intentId))
+    .limit(1);
+
+  return nearbyPaymentIntent ?? null;
+}
+
+export async function updateNearbyPaymentIntentRecordById(
+  id: string,
+  updates: UpdateNearbyPaymentIntentRecordInput
+) {
+  const [nearbyPaymentIntent] = await db
+    .update(nearbyPaymentIntents)
+    .set({
+      ...updates,
+      updatedAt: new Date(),
+    })
+    .where(eq(nearbyPaymentIntents.id, id))
+    .returning();
+
+  return nearbyPaymentIntent ?? null;
 }

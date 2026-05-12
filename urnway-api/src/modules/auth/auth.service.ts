@@ -18,6 +18,10 @@ import {
   verifyRefreshToken,
 } from '../../lib/jwt.js';
 import { findUserById, findUserByWalletAddress, createUser } from '../users/users.repository.js';
+import {
+  ensureUserPublicUserId,
+  generateUniquePublicUserId,
+} from '../users/public-user-id.js';
 import { HttpError } from '../../utils/http-error.js';
 
 type AuthenticatedUser = {
@@ -183,7 +187,16 @@ export async function verifyWalletSignature(input: VerifyWalletInput) {
   let user = await findUserByWalletAddress(normalizedWalletAddress);
 
   if (!user) {
-    user = await createUser(normalizedWalletAddress);
+    user = await createUser(
+      normalizedWalletAddress,
+      await generateUniquePublicUserId()
+    );
+  } else if (!user.publicUserId) {
+    const publicUserId = await ensureUserPublicUserId(user);
+    user = {
+      ...user,
+      publicUserId,
+    };
   }
 
   const session = await createSession(user);
@@ -195,6 +208,7 @@ export async function verifyWalletSignature(input: VerifyWalletInput) {
     user: {
       id: user.id,
       walletAddress: user.walletAddress,
+      publicUserId: user.publicUserId,
       username: user.username,
       mezoId: user.mezoId,
       email: user.email,

@@ -90,6 +90,37 @@ export type DirectSendPreflight = {
   preflight: PaymentLinkPreflight["preflight"];
 };
 
+export type NearbyPaymentIntentStatus =
+  | "created"
+  | "completed"
+  | "failed"
+  | "expired";
+
+export type NearbyPaymentIntent = {
+  paymentIntentId: string;
+  status: NearbyPaymentIntentStatus;
+  amountMinor: number;
+  currency: string;
+  sender: {
+    userId: string;
+    username: string;
+  };
+  receiver: {
+    userId: string;
+    publicUserId: string;
+  };
+  completedAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateNearbyPaymentIntentInput = {
+  receiverPublicUserId: string;
+  amountMinor: number;
+  currency: string;
+};
+
 export type VaultGoal = {
   id: string;
   name: string;

@@ -132,157 +132,143 @@ export default function LocationPickerSheet({
   return (
     <Modal
       visible={visible}
-      transparent
-      animationType="fade"
+      animationType="slide"
       onRequestClose={onClose}
     >
       <KeyboardAvoidingView
         style={styles.modalRoot}
         behavior={Platform.OS === "ios" ? "padding" : "height"}
-        keyboardVerticalOffset={Platform.OS === "ios" ? insets.top : 0}
       >
-        <Pressable
+        <View
           style={[
-            styles.overlay,
-            {
-              paddingTop: insets.top + spacing[10],
-              paddingHorizontal: spacing[3],
-              paddingBottom: spacing[3],
-            },
+            styles.container,
+            { paddingTop: insets.top, paddingBottom: insets.bottom },
           ]}
-          onPress={onClose}
         >
-          <Pressable style={styles.sheetShell} onPress={() => {}}>
-            <View
-              style={[
-                styles.sheet,
-                { paddingBottom: Math.max(insets.bottom, spacing[4]) },
-              ]}
-            >
-              <View style={styles.header}>
-                <Text variant="h4">{title}</Text>
-                <IconButton
-                  variant="ghost"
-                  size="sm"
-                  onPress={onClose}
-                  icon={<Ionicons name="close" size={24} color={colors.text.primary} />}
-                />
-              </View>
+          <View style={styles.header}>
+            <Text variant="h4">{title}</Text>
+            <IconButton
+              variant="ghost"
+              size="sm"
+              onPress={onClose}
+              icon={<Ionicons name="close" size={24} color={colors.text.primary} />}
+            />
+          </View>
 
-              <View style={styles.searchInputContainer}>
-                <Ionicons name="search-outline" size={20} color={colors.text.tertiary} />
-                <TextInput
-                  style={styles.searchInput}
-                  value={query}
-                  onChangeText={setQuery}
-                  placeholder={placeholder}
-                  placeholderTextColor={colors.text.tertiary}
-                  autoCapitalize="words"
-                  autoFocus
-                />
-              </View>
+          <View style={styles.searchInputContainer}>
+            <Ionicons name="search-outline" size={20} color={colors.text.tertiary} />
+            <TextInput
+              style={styles.searchInput}
+              value={query}
+              onChangeText={setQuery}
+              placeholder={placeholder}
+              placeholderTextColor={colors.text.tertiary}
+              autoCapitalize="words"
+              autoFocus
+            />
+          </View>
 
-              {isLoading ? (
-                <View style={styles.feedbackRow}>
-                  <ActivityIndicator color={colors.brand.default} />
-                  <Text variant="bodySmall" color="secondary">
-                    Loading suggestions...
-                  </Text>
-                </View>
-              ) : null}
+          {isLoading ? (
+            <View style={styles.feedbackRow}>
+              <ActivityIndicator color={colors.brand.default} />
+              <Text variant="bodySmall" color="secondary">
+                Loading suggestions...
+              </Text>
+            </View>
+          ) : null}
 
-              {errorMessage ? (
-                <View style={styles.feedbackRow}>
-                  <Ionicons name="alert-circle-outline" size={18} color={colors.status.error} />
-                  <Text variant="bodySmall" style={styles.errorText}>
-                    {errorMessage}
-                  </Text>
-                </View>
-              ) : null}
+          {errorMessage ? (
+            <View style={styles.feedbackRow}>
+              <Ionicons name="alert-circle-outline" size={18} color={colors.status.error} />
+              <Text variant="bodySmall" style={styles.errorText}>
+                {errorMessage}
+              </Text>
+            </View>
+          ) : null}
 
-              <ScrollView
-                style={styles.resultsList}
-                contentContainerStyle={styles.resultsContent}
-                keyboardShouldPersistTaps="handled"
-                keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
-                showsVerticalScrollIndicator={false}
+          <ScrollView
+            style={styles.resultsList}
+            contentContainerStyle={styles.resultsContent}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+            showsVerticalScrollIndicator={false}
+          >
+            {suggestions.map((suggestion) => (
+              <Pressable
+                key={suggestion.id}
+                style={styles.resultRow}
+                onPress={() => {
+                  onSelect(suggestion);
+                  onClose();
+                }}
               >
-                {suggestions.map((suggestion) => (
-                  <Pressable
-                    key={suggestion.id}
-                    style={styles.resultRow}
-                    onPress={() => {
-                      onSelect(suggestion);
-                      onClose();
-                    }}
-                  >
-                    <View style={styles.resultIcon}>
-                      <Ionicons
-                        name={
-                          scope === "flight"
-                            ? "airplane-outline"
-                            : scope === "stay"
-                              ? "bed-outline"
-                              : "location-outline"
-                        }
-                        size={18}
-                        color={colors.brand.default}
-                      />
-                    </View>
-                    <View style={styles.resultCopy}>
-                      <Text variant="body" weight="semiBold">
-                        {suggestion.primaryText}
-                      </Text>
-                      {suggestion.secondaryText ? (
-                        <Text variant="caption" color="secondary">
-                          {suggestion.secondaryText}
-                        </Text>
-                      ) : (
-                        <Text variant="caption" color="tertiary">
-                          {suggestion.source === "google"
-                            ? "Maps suggestion"
-                            : suggestion.source === "liteapi"
-                              ? "Hotel inventory suggestion"
-                              : scope === "flight"
-                                ? "Airport or city match"
-                                : "Saved location"}
-                        </Text>
-                      )}
-                    </View>
-                  </Pressable>
-                ))}
-
-                {!isLoading &&
-                !errorMessage &&
-                query.trim().length >= 2 &&
-                suggestions.length === 0 ? (
-                  <View style={styles.emptyState}>
-                    <Text variant="bodySmall" color="secondary" align="center">
-                      No suggestions yet. Try a broader city, airport, or address query.
+                <View style={styles.resultIcon}>
+                  <Ionicons
+                    name={
+                      scope === "flight"
+                        ? "airplane-outline"
+                        : scope === "stay"
+                          ? "bed-outline"
+                          : "location-outline"
+                    }
+                    size={18}
+                    color={colors.brand.default}
+                  />
+                </View>
+                <View style={styles.resultCopy}>
+                  <Text variant="body" weight="semiBold">
+                    {suggestion.primaryText}
+                  </Text>
+                  {suggestion.secondaryText ? (
+                    <Text variant="caption" color="secondary">
+                      {suggestion.secondaryText}
                     </Text>
-                  </View>
-                ) : null}
-              </ScrollView>
+                  ) : (
+                    <Text variant="caption" color="tertiary">
+                      {suggestion.source === "google"
+                        ? "Maps suggestion"
+                        : suggestion.source === "liteapi"
+                          ? "Hotel inventory suggestion"
+                          : scope === "flight"
+                            ? "Airport or city match"
+                            : "Saved location"}
+                    </Text>
+                  )}
+                </View>
+              </Pressable>
+            ))}
 
+            {!isLoading &&
+            !errorMessage &&
+            query.trim().length >= 2 &&
+            suggestions.length === 0 ? (
+              <View style={styles.emptyState}>
+                <Text variant="bodySmall" color="secondary" align="center">
+                  No suggestions yet. Try a broader city, airport, or address query.
+                </Text>
+              </View>
+            ) : null}
+          </ScrollView>
+
+          {onSubmitText && query.trim() ? (
+            <View style={styles.footer}>
               <Button
                 variant="secondary"
                 size="lg"
                 fullWidth
                 onPress={() => {
                   const trimmed = query.trim();
-
-                  if (trimmed && onSubmitText) {
+                  if (trimmed) {
                     onSubmitText(trimmed);
                   }
-
                   onClose();
                 }}
               >
-                {query.trim() && onSubmitText ? "Use typed location" : "Done"}
+                Use typed location
               </Button>
             </View>
-          </Pressable>
-        </Pressable>
+          ) : null}
+        </View>
       </KeyboardAvoidingView>
     </Modal>
   );
@@ -292,29 +278,17 @@ const styles = StyleSheet.create({
   modalRoot: {
     flex: 1,
   },
-  overlay: {
+  container: {
     flex: 1,
-    backgroundColor: colors.background.overlay,
-    justifyContent: "flex-end",
-  },
-  sheetShell: {
-    width: "100%",
-    maxHeight: "100%",
-  },
-  sheet: {
     backgroundColor: colors.background.primary,
-    borderRadius: borderRadius["3xl"],
     paddingHorizontal: spacing[5],
-    paddingTop: spacing[5],
     gap: spacing[4],
-    minHeight: 380,
-    maxHeight: "78%",
-    flexShrink: 1,
   },
   header: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    paddingTop: spacing[4],
   },
   searchInputContainer: {
     flexDirection: "row",
@@ -370,5 +344,9 @@ const styles = StyleSheet.create({
   },
   emptyState: {
     paddingVertical: spacing[5],
+  },
+  footer: {
+    paddingTop: spacing[2],
+    paddingBottom: spacing[4],
   },
 });

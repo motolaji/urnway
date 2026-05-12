@@ -28,14 +28,31 @@ export async function findUserByUsername(username: string) {
   return user ?? null;
 }
 
-export async function createUser(walletAddress: string) {
-  const [user] = await db.insert(users).values({ walletAddress }).returning();
+export async function findUserByPublicUserId(publicUserId: string) {
+  const [user] = await db
+    .select()
+    .from(users)
+    .where(eq(users.publicUserId, publicUserId))
+    .limit(1);
+
+  return user ?? null;
+}
+
+export async function createUser(
+  walletAddress: string,
+  publicUserId?: string | null
+) {
+  const [user] = await db
+    .insert(users)
+    .values({ walletAddress, publicUserId: publicUserId ?? null })
+    .returning();
   return user;
 }
 
 export async function updateUserById(
   id: string,
   updates: Partial<{
+    publicUserId: string | null;
     username: string | null;
     mezoId: string | null;
     email: string | null;

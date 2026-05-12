@@ -2,9 +2,12 @@ import { Router } from 'express';
 
 import { requireAuth } from '../../middleware/auth.js';
 import {
+  completeNearbyPaymentIntentHandler,
+  createNearbyPaymentIntentHandler,
   createPaymentQrHandler,
   createPaymentLinkHandler,
   deletePaymentLinkHandler,
+  getNearbyPaymentIntentHandler,
   getPublicPaymentQrHandler,
   getPaymentsOverviewHandler,
   getPublicPaymentLinkHandler,
@@ -20,6 +23,13 @@ export const paymentsRouter = Router();
 
 paymentsRouter.get('/', requireAuth, getPaymentsOverviewHandler);
 paymentsRouter.post('/send', requireAuth, preflightDirectSendHandler);
+paymentsRouter.post('/nearby/intents', requireAuth, createNearbyPaymentIntentHandler);
+paymentsRouter.get('/nearby/intents/:intentId', requireAuth, getNearbyPaymentIntentHandler);
+paymentsRouter.post(
+  '/nearby/intents/:intentId/complete',
+  requireAuth,
+  completeNearbyPaymentIntentHandler
+);
 paymentsRouter.get('/links', requireAuth, listPaymentLinksHandler);
 paymentsRouter.post('/links', requireAuth, createPaymentLinkHandler);
 paymentsRouter.post('/qr/generate', requireAuth, createPaymentQrHandler);

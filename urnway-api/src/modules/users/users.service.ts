@@ -4,6 +4,7 @@ import {
   findUserByUsername,
   updateUserById,
 } from './users.repository.js';
+import { ensureUserPublicUserId } from './public-user-id.js';
 
 type AuthenticatedUser = {
   id: string;
@@ -29,10 +30,13 @@ export async function getCurrentUserProfile(user: AuthenticatedUser) {
     throw new HttpError(404, 'User not found');
   }
 
+  const publicUserId = await ensureUserPublicUserId(storedUser);
+
   return {
     profile: {
       id: storedUser.id,
       walletAddress: storedUser.walletAddress,
+      publicUserId,
       username: storedUser.username,
       displayName: storedUser.username ?? storedUser.mezoId ?? storedUser.walletAddress,
       mezoId: storedUser.mezoId,
@@ -52,6 +56,8 @@ export async function updateCurrentUserProfile(
   if (!storedUser) {
     throw new HttpError(404, 'User not found');
   }
+
+  const existingPublicUserId = await ensureUserPublicUserId(storedUser);
 
   if (input.username) {
     const existingUser = await findUserByUsername(input.username);
@@ -75,6 +81,7 @@ export async function updateCurrentUserProfile(
     profile: {
       id: updatedUser.id,
       walletAddress: updatedUser.walletAddress,
+      publicUserId: updatedUser.publicUserId ?? existingPublicUserId,
       username: updatedUser.username,
       displayName:
         updatedUser.username ?? updatedUser.mezoId ?? updatedUser.walletAddress,

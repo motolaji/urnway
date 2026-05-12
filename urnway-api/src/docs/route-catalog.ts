@@ -105,7 +105,8 @@ export const routeGroups: ApiRouteGroup[] = [
       {
         method: 'GET',
         path: '/v1/users/me',
-        summary: 'Returns the signed-in user profile and app-facing identity fields.',
+        summary:
+          'Returns the signed-in user profile, including the nearby-discovery public user id.',
         status: 'available',
         auth: 'bearer',
       },
@@ -316,6 +317,30 @@ export const routeGroups: ApiRouteGroup[] = [
         path: '/v1/payments/send',
         summary:
           'Runs direct-send preflight for a username recipient and prepares an unsigned MUSD transfer request.',
+        status: 'available',
+        auth: 'bearer',
+      },
+      {
+        method: 'POST',
+        path: '/v1/payments/nearby/intents',
+        summary:
+          'Creates a nearby payment intent for a BLE-discovered receiver public user id.',
+        status: 'available',
+        auth: 'bearer',
+      },
+      {
+        method: 'GET',
+        path: '/v1/payments/nearby/intents/:intentId',
+        summary:
+          'Returns the current status of a nearby payment intent for sender/receiver verification.',
+        status: 'available',
+        auth: 'bearer',
+      },
+      {
+        method: 'POST',
+        path: '/v1/payments/nearby/intents/:intentId/complete',
+        summary:
+          'Marks a nearby payment intent as completed before the sender emits DONE over BLE.',
         status: 'available',
         auth: 'bearer',
       },

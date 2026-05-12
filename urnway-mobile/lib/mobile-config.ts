@@ -3,7 +3,7 @@ import * as Linking from "expo-linking";
 import { NativeModules, Platform } from "react-native";
 
 const DEFAULT_API_BASE_URL = "http://localhost:4000";
-const DEFAULT_AUTH_WEB_URL = "http://localhost:3000";
+const DEFAULT_AUTH_WEB_URL = "https://urnway-auth-web.vercel.app";
 const DEFAULT_MEZO_BORROW_URL = "https://mezo.org/feature/borrow";
 const DEFAULT_MEZO_SAVE_EARN_URL = "https://mezo.org/earn/vaults";
 

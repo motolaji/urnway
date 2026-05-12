@@ -12,7 +12,11 @@ import {
 import { env } from '../../config/env.js';
 import { mezoClient } from '../../lib/mezo.js';
 import { HttpError } from '../../utils/http-error.js';
-import { findUserById, findUserByUsername } from '../users/users.repository.js';
+import {
+  findUserById,
+  findUserByPublicUserId,
+  findUserByUsername,
+} from '../users/users.repository.js';
 import {
   getMusdTokenAddress,
   getWalletAssetSnapshot,
@@ -20,15 +24,18 @@ import {
   NATIVE_TOKEN_DECIMALS,
 } from '../wallet/wallet.service.js';
 import {
+  createNearbyPaymentIntentRecord,
   createPaymentLinkAttemptRecord,
   createPaymentLinkRecord,
   deletePaymentLinkForUser,
+  findNearbyPaymentIntentByIntentId,
   findPaymentLinkAttemptByTxHash,
   findPaymentLinkById,
   findPaymentLinkBySlug,
   listPaymentLinkAttemptsForLinkIds,
   listPaymentLinksForUser,
   markSubmittedAttemptsStaleForPaymentLink,
+  updateNearbyPaymentIntentRecordById,
   updatePaymentLinkAttemptRecordById,
   updatePaymentLinkRecordById,
 } from './payments.repository.js';
@@ -51,6 +58,12 @@ type SendPaymentInput = {
   note?: string;
 };
 
+type CreateNearbyPaymentIntentInput = {
+  receiverPublicUserId: string;
+  amountMinor: number;
+  currency: string;
+};
+
 type SubmitPaymentLinkInput = {
   txHash: string;
   senderWalletAddress: string;
@@ -59,6 +72,9 @@ type SubmitPaymentLinkInput = {
 type PaymentLinkRecord = NonNullable<Awaited<ReturnType<typeof findPaymentLinkById>>>;
 type PaymentLinkAttemptRecord = NonNullable<
   Awaited<ReturnType<typeof findPaymentLinkAttemptByTxHash>>
+>;
+type NearbyPaymentIntentRecord = NonNullable<
+  Awaited<ReturnType<typeof findNearbyPaymentIntentByIntentId>>
 >;
 
 type SerializedPaymentLink = {
@@ -99,13 +115,37 @@ type SerializedPaymentQr = {
   paymentLink: SerializedPaymentLink;
 };
 
+type SerializedNearbyPaymentIntent = {
+  paymentIntentId: string;
+  status: 'created' | 'completed' | 'failed' | 'expired';
+  amountMinor: number;
+  currency: string;
+  sender: {
+    userId: string;
+    username: string;
+  };
+  receiver: {
+    userId: string;
+    publicUserId: string;
+  };
+  completedAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 const SUBMITTED_TIMEOUT_MS = 1000 * 60 * 15;
+const NEARBY_PAYMENT_INTENT_TTL_MS = 1000 * 60 * 15;
 const submittedStatuses = new Set(['submitted']);
 const terminalStatuses = new Set(['confirmed', 'cancelled', 'expired']);
 const MOBILE_QR_SCHEME_PREFIX = 'urnwaymobile://payments/qr/';
 
 function buildPaymentLinkSlug() {
   return `pay-${randomUUID().slice(0, 8)}`;
+}
+
+function buildNearbyPaymentIntentId() {
+  return `pi_${randomUUID().replace(/-/g, '').slice(0, 10)}`;
 }
 
 function buildShareText({
@@ -142,6 +182,29 @@ async function buildSerializedPaymentQr(
   };
 }
 
+function serializeNearbyPaymentIntent(
+  paymentIntent: NearbyPaymentIntentRecord
+): SerializedNearbyPaymentIntent {
+  return {
+    paymentIntentId: paymentIntent.intentId,
+    status: paymentIntent.status as SerializedNearbyPaymentIntent['status'],
+    amountMinor: paymentIntent.amountMinor,
+    currency: paymentIntent.currency,
+    sender: {
+      userId: paymentIntent.senderUserId,
+      username: paymentIntent.senderUsername,
+    },
+    receiver: {
+      userId: paymentIntent.receiverUserId,
+      publicUserId: paymentIntent.receiverPublicUserId,
+    },
+    completedAt: paymentIntent.completedAt?.toISOString() ?? null,
+    expiresAt: paymentIntent.expiresAt?.toISOString() ?? null,
+    createdAt: paymentIntent.createdAt.toISOString(),
+    updatedAt: paymentIntent.updatedAt.toISOString(),
+  };
+}
+
 function normalizeWalletAddress(walletAddress: string) {
   if (!isAddress(walletAddress, { strict: false })) {
     throw new HttpError(400, 'Invalid wallet address');
@@ -170,6 +233,10 @@ function getPaymentLinkTimedOut(link: PaymentLinkRecord) {
   );
 }
 
+function getNearbyPaymentIntentExpired(intent: NearbyPaymentIntentRecord) {
+  return intent.expiresAt ? intent.expiresAt.getTime() <= Date.now() : false;
+}
+
 async function requirePaymentLink(slug: string) {
   const paymentLink = await findPaymentLinkBySlug(slug);
 
@@ -178,6 +245,16 @@ async function requirePaymentLink(slug: string) {
   }
 
   return paymentLink;
+}
+
+async function requireNearbyPaymentIntent(paymentIntentId: string) {
+  const paymentIntent = await findNearbyPaymentIntentByIntentId(paymentIntentId);
+
+  if (!paymentIntent) {
+    throw new HttpError(404, 'Nearby payment intent not found');
+  }
+
+  return paymentIntent;
 }
 
 async function buildRecipient(userId: string) {
@@ -233,6 +310,20 @@ async function synchronizePaymentLinkLifecycle(link: PaymentLinkRecord) {
   await markSubmittedAttemptsStaleForPaymentLink(link.id);
 
   return updatedLink ?? link;
+}
+
+async function synchronizeNearbyPaymentIntentLifecycle(
+  intent: NearbyPaymentIntentRecord
+) {
+  if (intent.status !== 'created' || !getNearbyPaymentIntentExpired(intent)) {
+    return intent;
+  }
+
+  const updatedIntent = await updateNearbyPaymentIntentRecordById(intent.id, {
+    status: 'expired',
+  });
+
+  return updatedIntent ?? intent;
 }
 
 function assertPaymentLinkIsActive(link: PaymentLinkRecord) {
@@ -460,7 +551,7 @@ export async function getPaymentsOverview(user: AuthenticatedUser) {
 
   return {
     summary: {
-      availableFlows: ['direct_send', 'payment_links', 'qr_payments'],
+      availableFlows: ['direct_send', 'payment_links', 'qr_payments', 'nearby'],
       createdLinkCount: links.length,
       recipient,
       nextUp: ['nearby_payments', 'escrow'],
@@ -624,6 +715,101 @@ export async function preflightDirectSendPayment(
       note: input.note?.trim() || null,
     },
     preflight: transfer.preflight,
+  };
+}
+
+export async function createNearbyPaymentIntent(
+  user: AuthenticatedUser,
+  input: CreateNearbyPaymentIntentInput
+) {
+  const sender = await findUserById(user.id);
+
+  if (!sender) {
+    throw new HttpError(404, 'User not found');
+  }
+
+  if (!sender.username) {
+    throw new HttpError(409, 'Set a username before using nearby payments');
+  }
+
+  const receiver = await findUserByPublicUserId(input.receiverPublicUserId.trim());
+
+  if (!receiver || !receiver.publicUserId) {
+    throw new HttpError(404, 'Nearby receiver not found');
+  }
+
+  if (receiver.id === user.id) {
+    throw new HttpError(409, 'You cannot create a nearby payment intent for yourself');
+  }
+
+  const paymentIntent = await createNearbyPaymentIntentRecord({
+    intentId: buildNearbyPaymentIntentId(),
+    senderUserId: user.id,
+    receiverUserId: receiver.id,
+    senderUsername: sender.username,
+    receiverPublicUserId: receiver.publicUserId,
+    amountMinor: input.amountMinor,
+    currency: input.currency.trim().toUpperCase(),
+    expiresAt: new Date(Date.now() + NEARBY_PAYMENT_INTENT_TTL_MS),
+  });
+
+  return {
+    paymentIntent: serializeNearbyPaymentIntent(paymentIntent),
+  };
+}
+
+export async function getNearbyPaymentIntent(
+  user: AuthenticatedUser,
+  paymentIntentId: string
+) {
+  const paymentIntent = await synchronizeNearbyPaymentIntentLifecycle(
+    await requireNearbyPaymentIntent(paymentIntentId)
+  );
+
+  if (
+    paymentIntent.senderUserId !== user.id &&
+    paymentIntent.receiverUserId !== user.id
+  ) {
+    throw new HttpError(404, 'Nearby payment intent not found');
+  }
+
+  return {
+    paymentIntent: serializeNearbyPaymentIntent(paymentIntent),
+  };
+}
+
+export async function completeNearbyPaymentIntent(
+  user: AuthenticatedUser,
+  paymentIntentId: string
+) {
+  const paymentIntent = await synchronizeNearbyPaymentIntentLifecycle(
+    await requireNearbyPaymentIntent(paymentIntentId)
+  );
+
+  if (paymentIntent.senderUserId !== user.id) {
+    throw new HttpError(404, 'Nearby payment intent not found');
+  }
+
+  if (paymentIntent.status === 'completed') {
+    return {
+      paymentIntent: serializeNearbyPaymentIntent(paymentIntent),
+    };
+  }
+
+  if (paymentIntent.status !== 'created') {
+    throw new HttpError(409, 'Nearby payment intent can no longer be completed', {
+      status: paymentIntent.status,
+    });
+  }
+
+  const completedAt = new Date();
+  const updatedIntent = await updateNearbyPaymentIntentRecordById(paymentIntent.id, {
+    status: 'completed',
+    completedAt,
+  });
+
+  return {
+    paymentIntent: serializeNearbyPaymentIntent(updatedIntent ?? paymentIntent),
   };
 }
 
