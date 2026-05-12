@@ -3,11 +3,10 @@
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { useSearchParams } from 'next/navigation';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { getAddress, isAddress } from 'viem';
+import { getAddress, isAddress, toHex } from 'viem';
 import {
   useAccount,
   useDisconnect,
-  useSendTransaction,
   useSwitchChain,
 } from 'wagmi';
 
@@ -28,18 +27,20 @@ type FlowStage =
   | 'submitted'
   | 'error';
 
+type TransactionRequest = {
+  to: `0x${string}`;
+  data: `0x${string}`;
+  value: bigint;
+  chainId: number;
+  gas?: bigint;
+  gasPrice?: bigint;
+};
+
 type TransactionRuntimeConfig =
   | {
       ok: true;
       redirectUri: string;
-      request: {
-        to: `0x${string}`;
-        data: `0x${string}`;
-        value: bigint;
-        chainId: number;
-        gas?: bigint;
-        gasPrice?: bigint;
-      };
+      request: TransactionRequest;
       slug?: string | null;
       amount?: string | null;
       recipientName?: string | null;
@@ -49,6 +50,10 @@ type TransactionRuntimeConfig =
       ok: false;
       error: string;
     };
+
+type Eip1193Provider = {
+  request(args: { method: string; params?: unknown[] | Record<string, unknown> }): Promise<unknown>;
+};
 
 function readRequired(value: string | null, fieldName: string) {
   if (!value || value.trim().length === 0) {
@@ -108,6 +113,78 @@ function isMobileWalletConnector(connectorName: string | undefined) {
     name.includes('trust') ||
     name.includes('metamask') ||
     name.includes('coinbase')
+  );
+}
+
+function normalizeTransactionHash(result: unknown) {
+  if (typeof result === 'string' && /^0x[a-fA-F0-9]{64}$/.test(result)) {
+    return result as `0x${string}`;
+  }
+
+  throw new Error('The connected wallet did not return a valid transaction hash.');
+}
+
+async function getWalletProvider(
+  connector: { getProvider?: (args?: { chainId?: number }) => Promise<unknown> } | undefined,
+  chainId: number
+) {
+  const provider =
+    typeof connector?.getProvider === 'function'
+      ? (((await connector.getProvider({ chainId }).catch(async () => connector.getProvider?.())) ??
+          null) as Eip1193Provider | null)
+      : null;
+
+  if (provider) {
+    return provider;
+  }
+
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  return (
+    ((window as typeof window & {
+      ethereum?: Eip1193Provider;
+      okxwallet?: Eip1193Provider;
+    }).ethereum ??
+      (window as typeof window & {
+        ethereum?: Eip1193Provider;
+        okxwallet?: Eip1193Provider;
+      }).okxwallet) as Eip1193Provider | undefined
+  ) ?? null;
+}
+
+async function sendTransactionThroughProvider(input: {
+  connector: { getProvider?: (args?: { chainId?: number }) => Promise<unknown> } | undefined;
+  walletAddress: `0x${string}`;
+  request: TransactionRequest;
+}) {
+  const provider = await getWalletProvider(input.connector, input.request.chainId);
+
+  if (!provider) {
+    throw new Error('Could not access the connected wallet provider to submit the transaction.');
+  }
+
+  const txRequest: Record<string, string> = {
+    from: input.walletAddress,
+    to: input.request.to,
+    data: input.request.data,
+    value: toHex(input.request.value),
+  };
+
+  if (input.request.gas !== undefined) {
+    txRequest.gas = toHex(input.request.gas);
+  }
+
+  if (input.request.gasPrice !== undefined) {
+    txRequest.gasPrice = toHex(input.request.gasPrice);
+  }
+
+  return normalizeTransactionHash(
+    await provider.request({
+      method: 'eth_sendTransaction',
+      params: [txRequest],
+    })
   );
 }
 
@@ -186,7 +263,6 @@ export default function TxScreen() {
   const { address, chainId, connector, isConnected } = useAccount();
   const { disconnect } = useDisconnect();
   const { switchChainAsync } = useSwitchChain();
-  const { sendTransactionAsync } = useSendTransaction();
   const autoSwitchAttemptedRef = useRef(false);
 
   const [stage, setStage] = useState<FlowStage>('idle');
@@ -318,31 +394,25 @@ export default function TxScreen() {
         await Promise.race([switchPromise, timeoutPromise]);
       }
 
-      // Show "awaiting wallet" state to prompt user to check their wallet
       setStage('awaiting_wallet');
-
-      // Transaction timeout (3 minutes - user needs time to open wallet and confirm)
-      const TX_TIMEOUT_MS = 180000;
-
-      const txPromise = sendTransactionAsync({
-        to: config.request.to,
-        data: config.request.data,
-        value: config.request.value,
-        chainId: config.request.chainId,
-        gas: config.request.gas,
-        gasPrice: config.request.gasPrice,
+      const txPromise = sendTransactionThroughProvider({
+        connector,
+        walletAddress: getAddress(address),
+        request: config.request,
       });
 
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => {
-          reject(new Error('Transaction timed out. Please check your wallet and try again.'));
-        }, TX_TIMEOUT_MS);
-      });
-
-      // Update to submitting once we know the request was sent
-      setStage('submitting');
-
-      const hash = await Promise.race([txPromise, timeoutPromise]);
+      const hash = isMobileWalletConnector(connector?.name)
+        ? await txPromise
+        : await Promise.race([
+            txPromise,
+            new Promise<never>((_, reject) => {
+              setTimeout(() => {
+                reject(
+                  new Error('Transaction timed out. Please check your wallet and try again.')
+                );
+              }, 180000);
+            }),
+          ]);
 
       // Build the result payload
       const resultPayload = {
@@ -473,7 +543,7 @@ export default function TxScreen() {
           </p>
         ) : null}
 
-        {(stage === 'awaiting_wallet' || stage === 'submitting') ? (
+        {stage === 'awaiting_wallet' ? (
           <p className="muted bridge-muted">
             {isMobileWalletConnector(connector?.name)
               ? 'Please open your wallet app to approve the transaction.'
