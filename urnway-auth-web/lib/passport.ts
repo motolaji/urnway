@@ -1,9 +1,20 @@
 'use client';
 
+import { getDefaultConfig, type WalletList } from '@rainbow-me/rainbowkit';
+import {
+  coinbaseWallet,
+  metaMaskWallet,
+  trustWallet,
+  walletConnectWallet,
+} from '@rainbow-me/rainbowkit/wallets';
 import { QueryClient } from '@tanstack/react-query';
-import { getConfig } from '@mezo-org/passport/dist/src/config.js';
+import {
+  okxWalletMezoTestnet,
+  unisatWalletMezoTestnet,
+  xverseWalletMezoTestnet,
+} from '@mezo-org/passport/dist/src/config.js';
 import { mezoTestnet as passportMezoTestnet } from '@mezo-org/passport/dist/src/constants.js';
-import type { Config } from 'wagmi';
+import { http, type Config } from 'wagmi';
 
 import { prepareWalletBridgeSession } from '@/lib/wallet-session';
 
@@ -21,6 +32,26 @@ export type PassportRuntimeConfig =
 const passportQueryClient = new QueryClient();
 export const mezoTestnet = passportMezoTestnet;
 
+const walletList: WalletList = [
+  {
+    groupName: 'Bitcoin',
+    wallets: [
+      unisatWalletMezoTestnet,
+      okxWalletMezoTestnet,
+      xverseWalletMezoTestnet,
+    ],
+  },
+  {
+    groupName: 'Ethereum',
+    wallets: [
+      metaMaskWallet,
+      trustWallet,
+      coinbaseWallet,
+      walletConnectWallet,
+    ],
+  },
+];
+
 export function readPassportRuntimeConfig(): PassportRuntimeConfig {
   prepareWalletBridgeSession();
 
@@ -37,11 +68,14 @@ export function readPassportRuntimeConfig(): PassportRuntimeConfig {
 
   return {
     ok: true,
-    wagmiConfig: getConfig({
+    wagmiConfig: getDefaultConfig({
       appName: 'Urnway Auth',
-      mezoNetwork: 'testnet',
-      walletConnectProjectId,
+      projectId: walletConnectProjectId,
       chains: [mezoTestnet],
+      wallets: walletList,
+      transports: {
+        [mezoTestnet.id]: http(mezoTestnet.rpcUrls.default.http[0]),
+      },
     }),
     queryClient: passportQueryClient,
   };
