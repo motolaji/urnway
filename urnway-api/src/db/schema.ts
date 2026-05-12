@@ -114,6 +114,98 @@ export const nearbyPaymentIntents = pgTable('nearby_payment_intents', {
     .notNull(),
 });
 
+export const balanceAccounts = pgTable('balance_accounts', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  userId: uuid('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' })
+    .unique(),
+  currency: text('currency').default('MUSD').notNull(),
+  availableAmountMinor: integer('available_amount_minor').default(0).notNull(),
+  reservedAmountMinor: integer('reserved_amount_minor').default(0).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+});
+
+export const balanceLedgerEntries = pgTable('balance_ledger_entries', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  accountId: uuid('account_id')
+    .notNull()
+    .references(() => balanceAccounts.id, { onDelete: 'cascade' }),
+  userId: uuid('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  entryType: text('entry_type').notNull(),
+  direction: text('direction').notNull(),
+  amountMinor: integer('amount_minor').notNull(),
+  currency: text('currency').default('MUSD').notNull(),
+  referenceType: text('reference_type'),
+  referenceId: text('reference_id'),
+  note: text('note'),
+  createdAt: timestamp('created_at', { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+});
+
+export const balanceTopupIntents = pgTable('balance_topup_intents', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  topupId: text('topup_id').notNull().unique(),
+  userId: uuid('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  amountMinor: integer('amount_minor').notNull(),
+  currency: text('currency').default('MUSD').notNull(),
+  status: text('status').default('prepared').notNull(),
+  treasuryWalletAddress: text('treasury_wallet_address').notNull(),
+  tokenAddress: text('token_address').notNull(),
+  senderWalletAddress: text('sender_wallet_address'),
+  txHash: text('tx_hash').unique(),
+  completedAt: timestamp('completed_at', { withTimezone: true }),
+  expiresAt: timestamp('expires_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+});
+
+export const sendCheckouts = pgTable('send_checkouts', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  checkoutId: text('checkout_id').notNull().unique(),
+  userId: uuid('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  receiverUserId: uuid('receiver_user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  receiverPublicUserId: text('receiver_public_user_id'),
+  receiverUsername: text('receiver_username'),
+  amountMinor: integer('amount_minor').notNull(),
+  currency: text('currency').default('MUSD').notNull(),
+  source: text('source').notNull(),
+  urnwayBalanceAmountMinor: integer('urnway_balance_amount_minor')
+    .default(0)
+    .notNull(),
+  externalWalletAmountMinor: integer('external_wallet_amount_minor')
+    .default(0)
+    .notNull(),
+  note: text('note'),
+  status: text('status').default('prepared').notNull(),
+  completedAt: timestamp('completed_at', { withTimezone: true }),
+  expiresAt: timestamp('expires_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+});
+
 export const tripVaults = pgTable('trip_vaults', {
   id: uuid('id').defaultRandom().primaryKey(),
   userId: uuid('user_id')
@@ -181,6 +273,9 @@ export const bookings = pgTable('bookings', {
   passengerName: text('passenger_name').notNull(),
   totalAmount: text('total_amount').notNull(),
   currency: text('currency').default('MUSD').notNull(),
+  paymentSource: text('payment_source'),
+  fundedAmount: text('funded_amount'),
+  fundedCurrency: text('funded_currency'),
   bookingReference: text('booking_reference').notNull().unique(),
   note: text('note'),
   cancellationPolicy: text('cancellation_policy').default('Flexible refund policy').notNull(),
@@ -189,6 +284,38 @@ export const bookings = pgTable('bookings', {
   cancelRequestedAt: timestamp('cancel_requested_at', { withTimezone: true }),
   refundedAt: timestamp('refunded_at', { withTimezone: true }),
   ticketIssuedAt: timestamp('ticket_issued_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+});
+
+export const bookingCheckouts = pgTable('booking_checkouts', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  checkoutId: text('checkout_id').notNull().unique(),
+  userId: uuid('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  tripId: uuid('trip_id').references(() => trips.id, { onDelete: 'set null' }),
+  bookingId: uuid('booking_id'),
+  mode: text('mode').notNull(),
+  source: text('source').notNull(),
+  totalAmountMinor: integer('total_amount_minor').notNull(),
+  currency: text('currency').default('MUSD').notNull(),
+  quoteAmount: text('quote_amount').notNull(),
+  quoteCurrency: text('quote_currency').notNull(),
+  urnwayBalanceAmountMinor: integer('urnway_balance_amount_minor')
+    .default(0)
+    .notNull(),
+  externalWalletAmountMinor: integer('external_wallet_amount_minor')
+    .default(0)
+    .notNull(),
+  payloadJson: text('payload_json').notNull(),
+  status: text('status').default('prepared').notNull(),
+  completedAt: timestamp('completed_at', { withTimezone: true }),
+  expiresAt: timestamp('expires_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true })
     .defaultNow()
     .notNull(),

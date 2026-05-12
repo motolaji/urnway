@@ -81,7 +81,13 @@ function readExpoDevelopmentHost() {
 
   const hostCandidates = [
     Constants.expoConfig?.hostUri,
-    Constants.expoGoConfig?.hostUri,
+    (
+      Constants.expoGoConfig as
+        | {
+            hostUri?: string;
+          }
+        | undefined
+    )?.hostUri,
     manifest2HostUri,
     Constants.platform?.hostUri,
     (

@@ -3,18 +3,23 @@ import type { RequestHandler } from 'express';
 import { fail, ok } from '../../utils/api-response.js';
 import {
   bookingIdSchema,
+  bookingCheckoutIdSchema,
+  completeBookingCheckoutSchema,
   createFlightBookingSchema,
   createHotelBookingSchema,
   flightSearchSchema,
   hotelSearchSchema,
+  prepareBookingCheckoutSchema,
 } from './bookings.schema.js';
 import {
+  completeBookingCheckout,
   createFlightBooking,
   createHotelBooking,
   cancelBooking,
   getBookingById,
   issueBoardingPass,
   listUserBookings,
+  prepareBookingCheckout,
   searchFlightOffers,
   searchHotelOffers,
 } from './bookings.service.js';
@@ -76,6 +81,45 @@ export const searchHotelOffersHandler: RequestHandler = (req, res) => {
     const input = hotelSearchSchema.parse(req.body);
 
     return Promise.resolve(searchHotelOffers(input)).then((data) => {
+      res.json(ok(data));
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Authenticated user missing from request') {
+      res.status(401).json(fail(error.message));
+      return;
+    }
+
+    throw error;
+  }
+};
+
+export const prepareBookingCheckoutHandler: RequestHandler = (req, res) => {
+  try {
+    const input = prepareBookingCheckoutSchema.parse(req.body);
+
+    return Promise.resolve(
+      prepareBookingCheckout(getUserFromRequest(req), input)
+    ).then((data) => {
+      res.status(201).json(ok(data));
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Authenticated user missing from request') {
+      res.status(401).json(fail(error.message));
+      return;
+    }
+
+    throw error;
+  }
+};
+
+export const completeBookingCheckoutHandler: RequestHandler = (req, res) => {
+  try {
+    const { checkoutId } = bookingCheckoutIdSchema.parse(req.params);
+    const input = completeBookingCheckoutSchema.parse(req.body ?? {});
+
+    return Promise.resolve(
+      completeBookingCheckout(getUserFromRequest(req), checkoutId, input)
+    ).then((data) => {
       res.json(ok(data));
     });
   } catch (error) {

@@ -11,15 +11,15 @@ import { colors, spacing, borderRadius, shadows } from "@/constants/design-token
 import { getMezoBorrowUrl } from "@/lib/mobile-config";
 import {
   ApiError,
-  fetchWalletBalance,
+  fetchUrnwayBalance,
   fetchWalletPosition,
-  type WalletBalanceResponse,
+  type UrnwayBalanceSummary,
   type WalletPositionResponse,
 } from "@/lib/session";
 import { useSession } from "@/providers/session-provider";
 
 type DashboardState = {
-  balance: WalletBalanceResponse["summary"] | null;
+  balance: UrnwayBalanceSummary | null;
   position: WalletPositionResponse["position"] | null;
 };
 
@@ -92,7 +92,7 @@ export default function HomeScreen() {
 
     try {
       const [balance, position] = await Promise.all([
-        fetchWalletBalance(accessToken),
+        fetchUrnwayBalance(accessToken),
         fetchWalletPosition(accessToken),
       ]);
 
@@ -138,7 +138,7 @@ export default function HomeScreen() {
   }
 
   const musdBalance = dashboard.balance
-    ? parseFloat(dashboard.balance.musdBalance)
+    ? parseFloat(dashboard.balance.account.availableAmount)
     : 0;
 
   return (
@@ -206,12 +206,33 @@ export default function HomeScreen() {
         ) : (
           <BalanceCard
             balance={musdBalance}
-            label="Spendable MUSD"
-            onAddMoney={() => void handleBorrow()}
-            addMoneyLabel="Borrow more MUSD"
+            label="Urnway balance"
+            onAddMoney={() => router.push("/pay")}
+            addMoneyLabel="Top up Urnway balance"
           />
         )}
       </Animated.View>
+
+      {dashboard.balance ? (
+        <Animated.View entering={FadeInDown.duration(600).delay(150)}>
+          <Card variant="default" style={styles.sourceCard}>
+            <View style={styles.sectionHeader}>
+              <Text variant="h4">External wallet</Text>
+              <Text variant="caption" color="tertiary">
+                Fallback source
+              </Text>
+            </View>
+            <Text variant="bodySmall" color="secondary">
+              {dashboard.balance.externalWallet.musdBalance}{" "}
+              {dashboard.balance.externalWallet.musdTokenSymbol} available to top up
+              your Urnway balance.
+            </Text>
+            <Button variant="secondary" size="sm" onPress={() => void handleBorrow()}>
+              Borrow more MUSD in Mezo
+            </Button>
+          </Card>
+        </Animated.View>
+      ) : null}
 
       {/* Quick Actions */}
       <Animated.View entering={FadeInDown.duration(600).delay(200)}>
@@ -252,7 +273,7 @@ export default function HomeScreen() {
               <Text variant="h4">Your Holdings</Text>
               {dashboard.balance && (
                 <Text variant="caption" color="tertiary">
-                  Updated {formatTimestamp(dashboard.balance.updatedAt)}
+                  Updated {formatTimestamp(dashboard.balance.externalWallet.updatedAt)}
                 </Text>
               )}
             </View>
@@ -268,15 +289,18 @@ export default function HomeScreen() {
                   Bitcoin
                 </Text>
                 <Text variant="caption" color="secondary">
-                  {dashboard.balance.nativeTokenSymbol} - Native
+                  {dashboard.balance.externalWallet.nativeTokenSymbol} - Native
                 </Text>
               </View>
               <View style={styles.holdingValue}>
                 <Text variant="body" weight="semiBold">
-                  {formatTokenAmount(dashboard.balance.nativeTokenBalance, 8)}
+                  {formatTokenAmount(
+                    dashboard.balance.externalWallet.nativeTokenBalance,
+                    8
+                  )}
                 </Text>
                 <Text variant="caption" color="secondary">
-                  {dashboard.balance.nativeTokenSymbol}
+                  {dashboard.balance.externalWallet.nativeTokenSymbol}
                 </Text>
               </View>
             </View>
@@ -299,10 +323,13 @@ export default function HomeScreen() {
               </View>
               <View style={styles.holdingValue}>
                 <Text variant="body" weight="semiBold">
-                  {formatTokenAmount(dashboard.balance.musdBalance, 2)}
+                  {formatTokenAmount(
+                    dashboard.balance.externalWallet.musdBalance,
+                    2
+                  )}
                 </Text>
                 <Text variant="caption" color="secondary">
-                  {dashboard.balance.musdTokenSymbol}
+                  {dashboard.balance.externalWallet.musdTokenSymbol}
                 </Text>
               </View>
             </View>
@@ -432,6 +459,9 @@ const styles = StyleSheet.create({
   },
   holdingsCard: {
     gap: spacing[4],
+  },
+  sourceCard: {
+    gap: spacing[3],
   },
   sectionHeader: {
     flexDirection: "row",

@@ -11,6 +11,7 @@
 - [x] Base modules exist for health, auth, wallet, payments, and webhooks
 - [x] API currently builds successfully
 - [x] Current code now exposes auth, wallet, direct-send, payment-link, QR, vault, trip, booking, boarding-pass, and webhook routes
+- [x] Current code now exposes Urnway balance accounts, top-up intents, send checkout, and booking checkout routes
 - [x] Current code now exposes a protected places autocomplete route for flight, stay, and trip destination suggestions
 - [x] Current schema now includes auth/session tables plus payment links, payment link attempts, travel goals, trips, bookings, and boarding passes
 - [x] Canonical `/v1` API contract exists
@@ -53,6 +54,11 @@ existing auth tables and expand to the planned product model.
 - [x] Base auth tables exist in schema and database: `users`, `refresh_tokens`, `auth_nonces`
 - [x] Add `payment_links`
 - [x] Add `payment_link_attempts`
+- [x] Add `balance_accounts`
+- [x] Add `balance_ledger_entries`
+- [x] Add `balance_topup_intents`
+- [x] Add `send_checkouts`
+- [x] Add `booking_checkouts`
 - [ ] Add `escrow_sends`
 - [x] Add `trips`
 - [x] Add `trip_vaults`
@@ -119,6 +125,9 @@ display.
 Purpose: power send/request, QR, links, escrow, and nearby discovery flows.
 
 - [x] Implement `POST /payments/send`
+- [x] Implement `POST /payments/send/prepare`
+- [x] Implement `GET /payments/send/:checkoutId`
+- [x] Implement `POST /payments/send/:checkoutId/complete`
 - [ ] Implement `POST /payments/request`
 - [x] Implement `POST /payments/qr/generate`
 - [x] Implement `GET /payments/qr/:qr_id`
@@ -160,6 +169,7 @@ Purpose: manage trips, shared pools, bookings, expenses, and boarding passes.
 - [ ] Implement trip cancel routes
 - [ ] Implement group routes for create, detail, invite, join, member removal, contributions, expense list, expense create, expense edit, balances, and settlement
 - [x] Implement booking routes for flight search, flight book, detail, and ticket issuance
+- [x] Implement booking checkout prepare and complete routes
 - [x] Add Duffel-backed flight search and hold-order booking with demo fallback
 - [x] Implement hotel search and hotel book routes
 - [x] Scaffold hotel search and booking integration for real provider inventory, now preferring liteAPI with demo fallback
@@ -177,6 +187,7 @@ Purpose: manage trips, shared pools, bookings, expenses, and boarding passes.
 - [x] Wire Mezo reads for native BTC and MUSD balances
 - [x] Use Mezo's own borrow UI instead of rebuilding trove-level protocol integrations for MVP
 - [ ] Add signed transaction preflight generation where needed
+- [x] Add wallet-funded top-up preflight for Urnway balance
 - [ ] Add MoonPay onramp and offramp integration
 - [ ] Add FX rate provider integration
 

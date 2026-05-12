@@ -10,8 +10,9 @@
 - [x] The repo has local starter screens for the tab routes
 - [x] Lint runs successfully
 - [x] Home screen reflects the current auth and dashboard slice
-- [x] Home screen now shows an API-backed wallet snapshot
+- [x] Home screen now shows Urnway balance first and the external wallet as the fallback source snapshot
 - [x] Pay screen now supports send-by-username plus payment links through submit, pending, stale/reset, and confirmed states
+- [x] Pay screen now supports Urnway balance top-up plus balance-aware direct send source selection
 - [x] Trips and booking forms now use scoped location suggestions plus native date picker sheets for key place/date inputs
 - [ ] Full Profile surface still needs expansion, and Trips still needs hotels, refunds, and broader transport layers
 - [x] WebView auth integration exists
@@ -99,6 +100,7 @@ what the user does with MUSD next.
 ### Pay flows
 
 - [x] Build send-by-username flow
+- [x] Default direct send to Urnway balance with external wallet and split fallback
 - [ ] Build request payment flow
 - [x] Build QR generator flow
 - [x] Build QR scanner flow
@@ -113,6 +115,7 @@ what the user does with MUSD next.
 - [x] Build nearby discoverable send flow with BLE user discovery
 - [x] Show incoming nearby PAY state and ACK/DONE verification states
 - [x] Clean up nearby scanning, advertising, subscriptions, and connections on exit
+- [x] Move nearby completion onto balance-aware send checkouts with stale-device expiry and ACK timeout handling
 - [ ] Build contacts send flow
 
 ### Device capabilities and edge cases
@@ -151,6 +154,7 @@ what the user does with MUSD next.
 - [x] Build hotel search UI
 - [x] Add hotel provider-aware booking fields for real-provider hotel bookings, now supporting liteAPI with demo fallback
 - [x] Build booking confirmation flow
+- [x] Route booking confirmation through balance-aware checkout with top-up support
 - [x] Allow flight and hotel bookings to link into an existing trip
 - [x] Build booking detail flow
 - [x] Build booking cancellation flow

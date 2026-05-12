@@ -216,6 +216,45 @@ export const routeGroups: ApiRouteGroup[] = [
     ],
   },
   {
+    name: 'Urnway balance',
+    description:
+      'Internal MUSD balance accounts, top-ups from the external wallet, and checkout funding state.',
+    routes: [
+      {
+        method: 'GET',
+        path: '/v1/balance',
+        summary:
+          'Returns the user’s Urnway-held MUSD balance plus the current external wallet snapshot used for top-ups.',
+        status: 'available',
+        auth: 'bearer',
+      },
+      {
+        method: 'POST',
+        path: '/v1/balance/topups/prepare',
+        summary:
+          'Prepares a wallet-funded MUSD top-up into the Urnway treasury wallet and returns wallet handoff preflight data.',
+        status: 'available',
+        auth: 'bearer',
+      },
+      {
+        method: 'POST',
+        path: '/v1/balance/topups/:topupId/submit',
+        summary:
+          'Submits a wallet tx hash for a prepared top-up and credits Urnway balance after onchain verification.',
+        status: 'available',
+        auth: 'bearer',
+      },
+      {
+        method: 'GET',
+        path: '/v1/balance/topups/:topupId',
+        summary:
+          'Returns the latest state for a prepared or submitted Urnway balance top-up intent.',
+        status: 'available',
+        auth: 'bearer',
+      },
+    ],
+  },
+  {
     name: 'Onramp and offramp',
     description: 'Fiat conversion, quote, status, and FX endpoints.',
     routes: [
@@ -317,6 +356,30 @@ export const routeGroups: ApiRouteGroup[] = [
         path: '/v1/payments/send',
         summary:
           'Runs direct-send preflight for a username recipient and prepares an unsigned MUSD transfer request.',
+        status: 'available',
+        auth: 'bearer',
+      },
+      {
+        method: 'POST',
+        path: '/v1/payments/send/prepare',
+        summary:
+          'Prepares a balance-aware direct send checkout using Urnway balance, external wallet, or split funding.',
+        status: 'available',
+        auth: 'bearer',
+      },
+      {
+        method: 'GET',
+        path: '/v1/payments/send/:checkoutId',
+        summary:
+          'Returns the current status of a prepared direct send checkout for sender/receiver verification.',
+        status: 'available',
+        auth: 'bearer',
+      },
+      {
+        method: 'POST',
+        path: '/v1/payments/send/:checkoutId/complete',
+        summary:
+          'Completes a prepared send checkout by debiting Urnway balance and crediting the recipient internally.',
         status: 'available',
         auth: 'bearer',
       },
@@ -508,6 +571,22 @@ export const routeGroups: ApiRouteGroup[] = [
         method: 'POST',
         path: '/v1/bookings/flights/book',
         summary: 'Creates a flight booking from a selected offer, including Duffel hold orders for supported provider-backed flights.',
+        status: 'available',
+        auth: 'bearer',
+      },
+      {
+        method: 'POST',
+        path: '/v1/bookings/checkout/prepare',
+        summary:
+          'Prepares a booking checkout with Urnway balance, external wallet, or split funding before provider booking is created.',
+        status: 'available',
+        auth: 'bearer',
+      },
+      {
+        method: 'POST',
+        path: '/v1/bookings/checkout/:checkoutId/complete',
+        summary:
+          'Completes a prepared booking checkout, reserves funds, creates the booking, and commits or releases balance accordingly.',
         status: 'available',
         auth: 'bearer',
       },

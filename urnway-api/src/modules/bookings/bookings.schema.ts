@@ -3,6 +3,7 @@ import { z } from 'zod';
 const amountPattern = /^\d+(\.\d+)?$/;
 const isoDatePattern = /^\d{4}-\d{2}-\d{2}$/;
 const providerIdSchema = z.string().trim().min(1);
+const paymentSourceSchema = z.enum(['urnway_balance', 'external_wallet', 'split']);
 
 const travelLabelSchema = z
   .string()
@@ -290,6 +291,27 @@ export const createHotelBookingSchema = z.object({
       message: 'email is required for liteAPI hotel bookings',
     });
   }
+});
+
+export const bookingCheckoutIdSchema = z.object({
+  checkoutId: z.string().trim().min(1, 'checkoutId is required'),
+});
+
+export const prepareBookingCheckoutSchema = z.discriminatedUnion('mode', [
+  z.object({
+    mode: z.literal('flight'),
+    source: paymentSourceSchema,
+    booking: createFlightBookingSchema,
+  }),
+  z.object({
+    mode: z.literal('hotel'),
+    source: paymentSourceSchema,
+    booking: createHotelBookingSchema,
+  }),
+]);
+
+export const completeBookingCheckoutSchema = z.object({
+  topupId: z.string().trim().min(1).optional(),
 });
 
 export const ticketIssueSchema = z.object({});

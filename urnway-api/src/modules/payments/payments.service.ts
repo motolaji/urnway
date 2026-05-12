@@ -39,6 +39,11 @@ import {
   updatePaymentLinkAttemptRecordById,
   updatePaymentLinkRecordById,
 } from './payments.repository.js';
+import {
+  completeSendCheckout as completeUrnwaySendCheckout,
+  getSendCheckoutStatus as getUrnwaySendCheckoutStatus,
+  prepareSendCheckout as prepareUrnwaySendCheckout,
+} from '../balance/balance.service.js';
 
 type AuthenticatedUser = {
   id: string;
@@ -716,6 +721,37 @@ export async function preflightDirectSendPayment(
     },
     preflight: transfer.preflight,
   };
+}
+
+export async function prepareSendCheckout(
+  user: AuthenticatedUser,
+  input: {
+    username?: string;
+    receiverPublicUserId?: string;
+    amountMinor: number;
+    currency: string;
+    source: 'urnway_balance' | 'external_wallet' | 'split';
+    note?: string;
+  }
+) {
+  return prepareUrnwaySendCheckout(user, input);
+}
+
+export async function getSendCheckoutStatus(
+  user: AuthenticatedUser,
+  checkoutId: string
+) {
+  return getUrnwaySendCheckoutStatus(user, checkoutId);
+}
+
+export async function completeSendCheckout(
+  user: AuthenticatedUser,
+  checkoutId: string,
+  input: {
+    topupId?: string;
+  }
+) {
+  return completeUrnwaySendCheckout(user, checkoutId, input);
 }
 
 export async function createNearbyPaymentIntent(

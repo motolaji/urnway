@@ -1,5 +1,15 @@
 import { HttpError } from '../../utils/http-error.js';
 import {
+  commitReservedBookingFunds,
+  formatMinorAmount,
+  getBalanceTopup,
+  getBookingCheckoutForUser,
+  markBookingCheckoutCompleted,
+  prepareBookingCheckout as prepareBalanceBookingCheckout,
+  releaseReservedBookingFunds,
+  reserveBookingFunds,
+} from '../balance/balance.service.js';
+import {
   createBoardingPassRecord,
   createBookingRecord,
   findBoardingPassByBookingIdForUser,
@@ -351,6 +361,9 @@ async function serializeBooking(
     payment: {
       totalAmount: booking.totalAmount,
       currency: booking.currency,
+      source: booking.paymentSource,
+      fundedAmount: booking.fundedAmount,
+      fundedCurrency: booking.fundedCurrency,
     },
     travel: isFlight
       ? {
@@ -570,9 +583,150 @@ export async function listUserBookings(user: AuthenticatedUser) {
   };
 }
 
+export async function prepareBookingCheckout(
+  user: AuthenticatedUser,
+  input:
+    | {
+        mode: 'flight';
+        source: 'urnway_balance' | 'external_wallet' | 'split';
+        booking: CreateFlightBookingInput;
+      }
+    | {
+        mode: 'hotel';
+        source: 'urnway_balance' | 'external_wallet' | 'split';
+        booking: CreateHotelBookingInput;
+      }
+) {
+  return prepareBalanceBookingCheckout(user, {
+    mode: input.mode,
+    source: input.source,
+    quoteAmount: input.booking.offer.totalAmount,
+    quoteCurrency: input.booking.offer.currency,
+    tripId: input.booking.tripId,
+    payloadJson: JSON.stringify(input),
+  });
+}
+
+export async function completeBookingCheckout(
+  user: AuthenticatedUser,
+  checkoutId: string,
+  input: {
+    topupId?: string;
+  }
+) {
+  const checkout = await getBookingCheckoutForUser(user, checkoutId);
+
+  if (checkout.status === 'completed' && checkout.bookingId) {
+    const existingBooking = await findBookingByIdForUser(user.id, checkout.bookingId);
+
+    if (!existingBooking) {
+      throw new HttpError(404, 'Booking not found');
+    }
+
+    return {
+      booking: await serializeBooking(user, existingBooking),
+      checkout: {
+        checkoutId: checkout.checkoutId,
+        status: checkout.status,
+      },
+    };
+  }
+
+  if (checkout.expiresAt && checkout.expiresAt.getTime() <= Date.now()) {
+    throw new HttpError(410, 'Booking checkout has expired');
+  }
+
+  if (checkout.status !== 'prepared') {
+    throw new HttpError(409, 'Booking checkout can no longer be completed', {
+      status: checkout.status,
+    });
+  }
+
+  if (checkout.externalWalletAmountMinor > 0 && input.topupId) {
+    const topup = await getBalanceTopup(user, input.topupId);
+
+    if (topup.topup.status !== 'completed') {
+      throw new HttpError(409, 'Top-up has not completed yet', {
+        status: topup.topup.status,
+      });
+    }
+
+    if (topup.topup.amountMinor < checkout.externalWalletAmountMinor) {
+      throw new HttpError(409, 'Top-up amount is lower than the booking shortfall', {
+        topupAmountMinor: topup.topup.amountMinor,
+        requiredAmountMinor: checkout.externalWalletAmountMinor,
+      });
+    }
+  }
+
+  await reserveBookingFunds({
+    userId: user.id,
+    amountMinor: checkout.totalAmountMinor,
+    referenceId: checkout.checkoutId,
+    note: `Booking checkout ${checkout.checkoutId}`,
+  });
+
+  try {
+    const parsedPayload = JSON.parse(checkout.payloadJson) as
+      | {
+          mode: 'flight';
+          source: 'urnway_balance' | 'external_wallet' | 'split';
+          booking: CreateFlightBookingInput;
+        }
+      | {
+          mode: 'hotel';
+          source: 'urnway_balance' | 'external_wallet' | 'split';
+          booking: CreateHotelBookingInput;
+        };
+
+    const funding = {
+      paymentSource: checkout.source,
+      fundedAmount: formatMinorAmount(checkout.totalAmountMinor),
+      fundedCurrency: checkout.currency,
+    };
+
+    const result =
+      parsedPayload.mode === 'flight'
+        ? await createFlightBooking(user, parsedPayload.booking, funding)
+        : await createHotelBooking(user, parsedPayload.booking, funding);
+
+    await commitReservedBookingFunds({
+      userId: user.id,
+      amountMinor: checkout.totalAmountMinor,
+      referenceId: checkout.checkoutId,
+      note: `Booking checkout ${checkout.checkoutId}`,
+    });
+    await markBookingCheckoutCompleted({
+      checkoutId,
+      bookingId: result.booking.id,
+    });
+
+    return {
+      booking: result.booking,
+      checkout: {
+        checkoutId,
+        status: 'completed',
+      },
+    };
+  } catch (error) {
+    await releaseReservedBookingFunds({
+      userId: user.id,
+      amountMinor: checkout.totalAmountMinor,
+      referenceId: checkout.checkoutId,
+      note: `Booking checkout ${checkout.checkoutId}`,
+    });
+    throw error;
+  }
+}
+
 export async function createFlightBooking(
   user: AuthenticatedUser,
-  input: CreateFlightBookingInput
+  input: CreateFlightBookingInput,
+  funding?: {
+    paymentSource?: string | null;
+    fundedAmount?: string | null;
+    fundedCurrency?: string | null;
+  }
 ) {
   const linkedTrip = await resolveLinkedTripForBooking(
     user,
@@ -646,6 +800,9 @@ export async function createFlightBooking(
     passengerName: trimmedPassengerName,
     totalAmount,
     currency,
+    paymentSource: funding?.paymentSource ?? null,
+    fundedAmount: funding?.fundedAmount ?? null,
+    fundedCurrency: funding?.fundedCurrency ?? null,
     bookingReference,
     note: input.note?.trim() || null,
     cancellationPolicy,
@@ -660,7 +817,12 @@ export async function createFlightBooking(
 
 export async function createHotelBooking(
   user: AuthenticatedUser,
-  input: CreateHotelBookingInput
+  input: CreateHotelBookingInput,
+  funding?: {
+    paymentSource?: string | null;
+    fundedAmount?: string | null;
+    fundedCurrency?: string | null;
+  }
 ) {
   const linkedTrip = await resolveLinkedTripForBooking(
     user,
@@ -749,6 +911,9 @@ export async function createHotelBooking(
     passengerName: trimmedGuestName,
     totalAmount,
     currency,
+    paymentSource: funding?.paymentSource ?? null,
+    fundedAmount: funding?.fundedAmount ?? null,
+    fundedCurrency: funding?.fundedCurrency ?? null,
     bookingReference: resolvedBookingReference,
     note: input.note?.trim() || null,
     cancellationPolicy,

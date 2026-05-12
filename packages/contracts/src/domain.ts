@@ -90,6 +90,103 @@ export type DirectSendPreflight = {
   preflight: PaymentLinkPreflight["preflight"];
 };
 
+export type PaymentSource = "urnway_balance" | "external_wallet" | "split";
+
+export type BalanceAccount = {
+  currency: string;
+  availableAmountMinor: number;
+  availableAmount: string;
+  reservedAmountMinor: number;
+  reservedAmount: string;
+  totalAmountMinor: number;
+  totalAmount: string;
+};
+
+export type BalanceTopup = {
+  topupId: string;
+  status: "prepared" | "submitted" | "completed" | "failed" | "expired";
+  amountMinor: number;
+  amount: string;
+  currency: string;
+  treasuryWalletAddress: string;
+  tokenAddress: string;
+  senderWalletAddress: string | null;
+  txHash: string | null;
+  completedAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type FundingPlan = {
+  source: PaymentSource;
+  totalAmountMinor: number;
+  totalAmount: string;
+  urnwayBalanceAmountMinor: number;
+  urnwayBalanceAmount: string;
+  externalWalletAmountMinor: number;
+  externalWalletAmount: string;
+  availableBalanceAmountMinor: number;
+  availableBalanceAmount: string;
+  shortfallAmountMinor: number;
+  shortfallAmount: string;
+  requiresTopUp: boolean;
+  canCompleteNow: boolean;
+};
+
+export type UrnwayBalanceSummary = {
+  account: BalanceAccount;
+  externalWallet: {
+    walletAddress: string;
+    nativeTokenBalance: string;
+    nativeTokenSymbol: string;
+    musdBalance: string;
+    musdTokenSymbol: string;
+    source: "mezo";
+    updatedAt: string;
+  };
+  treasuryWalletAddress: string | null;
+  tokenAddress: string;
+  updatedAt: string;
+};
+
+export type SendCheckout = {
+  checkoutId: string;
+  status: "prepared" | "completed" | "expired";
+  source: PaymentSource;
+  amountMinor: number;
+  amount: string;
+  currency: string;
+  note: string | null;
+  receiver: {
+    userId: string;
+    publicUserId: string | null;
+    username: string | null;
+  };
+  fundingPlan: FundingPlan;
+  completedAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type BookingCheckout = {
+  checkoutId: string;
+  status: "prepared" | "completed" | "expired";
+  mode: "flight" | "hotel";
+  source: PaymentSource;
+  fundingAmountMinor: number;
+  fundingAmount: string;
+  fundingCurrency: string;
+  quoteAmount: string;
+  quoteCurrency: string;
+  fundingPlan: FundingPlan;
+  completedAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type NearbyPaymentIntentStatus =
   | "created"
   | "completed"
@@ -287,6 +384,9 @@ export type Booking = {
   payment: {
     totalAmount: string;
     currency: string;
+    source: string | null;
+    fundedAmount: string | null;
+    fundedCurrency: string | null;
   };
   travel:
     | {

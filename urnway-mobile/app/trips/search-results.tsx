@@ -27,293 +27,231 @@ import {
   type FlightBookingOffer,
   type HotelBookingOffer,
 } from "@/lib/session";
-import { useSession } from "@/providers/session-provider";
 import { useBookingStore } from "@/lib/stores/booking-store";
 import { useFlightSearchStore } from "@/lib/stores/flight-search-store";
 import { useHotelSearchStore } from "@/lib/stores/hotel-search-store";
+import { useSession } from "@/providers/session-provider";
 
 type SearchType = "flight" | "hotel";
-
 type SortOption =
   | "price-asc"
   | "price-desc"
   | "duration-asc"
   | "departure-asc";
 
+function parseDurationToMinutes(duration: string) {
+  const hours = Number(duration.match(/(\d+)\s*h/i)?.[1] ?? "0");
+  const minutes = Number(duration.match(/(\d+)\s*m/i)?.[1] ?? "0");
+  return hours * 60 + minutes;
+}
+
+function formatMoney(amount: string, currency: string) {
+  return `${amount} ${currency}`;
+}
+
 export default function SearchResultsScreen() {
   const insets = useSafeAreaInsets();
-  const params = useLocalSearchParams<{ type: SearchType }>();
-  const searchType = params.type || "flight";
+  const params = useLocalSearchParams<{ type?: SearchType }>();
+  const searchType: SearchType = params.type === "hotel" ? "hotel" : "flight";
 
   const { tokens } = useSession();
   const flightSearch = useFlightSearchStore();
   const hotelSearch = useHotelSearchStore();
   const { setSelectedOffer } = useBookingStore();
 
-  const [offers, setOffers] = useState<
-    (FlightBookingOffer | HotelBookingOffer)[]
-  >([]);
+  const [offers, setOffers] = useState<Array<FlightBookingOffer | HotelBookingOffer>>(
+    []
+  );
   const [filteredOffers, setFilteredOffers] = useState<
-    (FlightBookingOffer | HotelBookingOffer)[]
+    Array<FlightBookingOffer | HotelBookingOffer>
   >([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
-
-  // Filter state
   const [showFilters, setShowFilters] = useState(false);
+  const [showSort, setShowSort] = useState(false);
   const [selectedCabinClass, setSelectedCabinClass] = useState<
     "economy" | "premium" | "business" | null
   >(null);
   const [selectedRoomTier, setSelectedRoomTier] = useState<
     "standard" | "deluxe" | "suite" | null
   >(null);
-
-  // Sort state
-  const [showSort, setShowSort] = useState(false);
   const [sortBy, setSortBy] = useState<SortOption>("price-asc");
 
-  // Fetch results on mount
   useEffect(() => {
     void fetchResults();
   }, []);
 
-  // Apply filters and sorting when offers or filter/sort state changes
   useEffect(() => {
     applyFiltersAndSort();
-  }, [offers, selectedCabinClass, selectedRoomTier, sortBy]);
+  }, [offers, selectedCabinClass, selectedRoomTier, sortBy, searchType]);
 
-  const fetchResults = async () => {
+  async function fetchResults() {
+    const accessToken = tokens?.accessToken;
+
+    if (!accessToken) {
+      setIsLoading(false);
+      setRefreshing(false);
+      setError("Authentication required. Please sign in.");
+      return;
+    }
+
     try {
       setIsLoading(true);
       setError(null);
 
-      const accessToken = tokens?.accessToken;
-      if (!accessToken) {
-        setError("Authentication required. Please sign in.");
-        return;
-      }
-
       if (searchType === "flight") {
-        // Log Zustand store state for debugging
-        console.log("Flight search store state:", {
-          flightType: flightSearch.flightType,
-          origin: flightSearch.origin,
-          destination: flightSearch.destination,
-          departDate: flightSearch.departDate,
-          returnDate: flightSearch.returnDate,
-        });
-
-        // Validate flight search params before making API call
         if (flightSearch.flightType === "multicity") {
-          const hasInvalidSegment = flightSearch.multiCitySegments.some(
-            (seg) => !seg.origin?.trim() || !seg.destination?.trim() || !seg.departDate?.trim()
+          setOffers([]);
+          setError(
+            "Multi-city provider-backed search is not available yet. Use one-way or round-trip."
           );
-          if (hasInvalidSegment) {
-            setError("Please fill in all flight segments. Missing origin, destination, or date.");
-            setIsLoading(false);
-            return;
-          }
-        } else {
-          if (!flightSearch.origin?.trim() || !flightSearch.destination?.trim() || !flightSearch.departDate?.trim()) {
-            setError("Please fill in all required fields. Missing origin, destination, or departure date.");
-            setIsLoading(false);
-            return;
-          }
-          if (flightSearch.flightType === "roundtrip" && !flightSearch.returnDate?.trim()) {
-            setError("Please select a return date for round-trip flights.");
-            setIsLoading(false);
-            return;
-          }
-        }
-      } else {
-        // Validate hotel search params
-        if (!hotelSearch.city.trim() || !hotelSearch.checkIn.trim() || !hotelSearch.checkOut.trim()) {
-          setError("Please fill in all required fields for hotel search.");
-          setIsLoading(false);
           return;
         }
-      }
 
-      if (searchType === "flight") {
-        // Build flight search params based on flight type
-        if (flightSearch.flightType === "multicity") {
-          // Multi-city search
-          const searchParams = {
-            type: "multi-city" as const,
-            segments: flightSearch.multiCitySegments.map((seg) => ({
-              origin: seg.originSearchValue || seg.origin,
-              destination: seg.destinationSearchValue || seg.destination,
-              departDate: seg.departDate,
-            })),
-            cabinClass: flightSearch.cabinClass,
-          };
-          console.log("Multi-city search params:", searchParams);
-          const response = await searchFlightBookingOffers(searchParams, accessToken);
-          const results = (response as any)?.offers || response;
-          console.log("API returned results:", Array.isArray(results), "count:", results?.length);
-          setOffers(results);
-        } else if (flightSearch.flightType === "oneway") {
-          // One-way search
-          const searchParams = {
-            type: "one-way" as const,
-            origin: flightSearch.originSearchValue || flightSearch.origin,
-            destination: flightSearch.destinationSearchValue || flightSearch.destination,
-            departDate: flightSearch.departDate,
-            cabinClass: flightSearch.cabinClass,
-          };
-          console.log("One-way search params:", JSON.stringify(searchParams, null, 2));
-          const response = await searchFlightBookingOffers(searchParams, accessToken);
-          const results = (response as any)?.offers || response;
-          console.log("API returned results:", Array.isArray(results), "count:", results?.length);
-          setOffers(results);
-        } else {
-          // Round-trip search
-          const searchParams = {
-            type: "return" as const,
-            origin: flightSearch.originSearchValue || flightSearch.origin,
-            destination: flightSearch.destinationSearchValue || flightSearch.destination,
-            departDate: flightSearch.departDate,
-            returnDate: flightSearch.returnDate,
-            cabinClass: flightSearch.cabinClass,
-          };
-          console.log("Round-trip search params:", JSON.stringify(searchParams, null, 2));
-          const response = await searchFlightBookingOffers(searchParams, accessToken);
-          const results = (response as any)?.offers || response;
-          console.log("API returned results:", Array.isArray(results), "count:", results?.length);
-          setOffers(results);
+        const origin = flightSearch.originSearchValue || flightSearch.origin;
+        const destination =
+          flightSearch.destinationSearchValue || flightSearch.destination;
+
+        if (!origin.trim() || !destination.trim() || !flightSearch.departDate.trim()) {
+          setOffers([]);
+          setError("Missing origin, destination, or departure date.");
+          return;
         }
-      } else {
-        // Hotel search
-        const response = await searchHotelBookingOffers(
+
+        if (
+          flightSearch.flightType === "roundtrip" &&
+          !flightSearch.returnDate.trim()
+        ) {
+          setOffers([]);
+          setError("Round-trip search needs a return date.");
+          return;
+        }
+
+        const response = await searchFlightBookingOffers(
           {
-            city: hotelSearch.citySearchValue || hotelSearch.city,
-            checkIn: hotelSearch.checkIn,
-            checkOut: hotelSearch.checkOut,
-            rooms: parseInt(hotelSearch.rooms, 10),
-            roomTier: hotelSearch.roomTier,
+            origin,
+            destination,
+            departDate: flightSearch.departDate,
+            returnDate:
+              flightSearch.flightType === "roundtrip"
+                ? flightSearch.returnDate
+                : undefined,
+            cabinClass: flightSearch.cabinClass,
           },
           accessToken
         );
-        const results = (response as any)?.offers || response;
-        console.log("Hotel API returned results:", Array.isArray(results), "count:", results?.length);
-        setOffers(results);
+
+        setOffers(response.offers);
+        return;
       }
-    } catch (err) {
-      console.error("Search error:", err);
-      if (err instanceof ApiError) {
-        console.error("API Error details:", err.details);
-        // Extract detailed validation errors if available
-        const details = err.details as any;
-        if (details?.fieldErrors) {
-          const fieldErrors = Object.entries(details.fieldErrors)
-            .map(([field, errors]) => `${field}: ${(errors as string[]).join(", ")}`)
-            .join("; ");
-          setError(`Validation failed: ${fieldErrors}`);
-        } else if (details?.formErrors) {
-          setError(`Validation failed: ${details.formErrors.join("; ")}`);
-        } else {
-          setError(err.message || "Search failed. Please try again.");
-        }
+
+      const city = hotelSearch.citySearchValue || hotelSearch.city;
+
+      if (!city.trim() || !hotelSearch.checkIn.trim() || !hotelSearch.checkOut.trim()) {
+        setOffers([]);
+        setError("Missing city, check-in, or check-out date.");
+        return;
+      }
+
+      const response = await searchHotelBookingOffers(
+        {
+          city,
+          checkInDate: hotelSearch.checkIn,
+          checkOutDate: hotelSearch.checkOut,
+          roomCount: Number.parseInt(hotelSearch.rooms, 10) || 1,
+          roomTier: hotelSearch.roomTier,
+        },
+        accessToken
+      );
+
+      setOffers(response.offers);
+    } catch (caughtError) {
+      if (caughtError instanceof ApiError) {
+        setError(caughtError.message);
       } else {
         setError(
-          err instanceof Error
-            ? err.message
-            : "Failed to load search results. Please try again."
+          caughtError instanceof Error
+            ? caughtError.message
+            : "Failed to load search results."
         );
       }
     } finally {
       setIsLoading(false);
       setRefreshing(false);
     }
-  };
+  }
 
-  const applyFiltersAndSort = () => {
-    // Ensure offers is an array
-    if (!Array.isArray(offers)) {
-      console.error("Offers is not an array:", offers);
-      setFilteredOffers([]);
-      return;
-    }
+  function applyFiltersAndSort() {
+    const nextOffers = [...offers];
 
-    let filtered = [...offers];
-
-    // Apply filters
-    if (searchType === "flight" && selectedCabinClass) {
-      filtered = filtered.filter(
-        (offer) =>
-          "cabinClass" in offer && offer.cabinClass === selectedCabinClass
-      );
-    }
-
-    if (searchType === "hotel" && selectedRoomTier) {
-      filtered = filtered.filter(
-        (offer) => "roomTier" in offer && offer.roomTier === selectedRoomTier
-      );
-    }
-
-    // Apply sorting
-    filtered.sort((a, b) => {
-      const aAmount = parseFloat(a.totalAmount);
-      const bAmount = parseFloat(b.totalAmount);
-
-      switch (sortBy) {
-        case "price-asc":
-          return aAmount - bAmount;
-        case "price-desc":
-          return bAmount - aAmount;
-        case "duration-asc":
-          if ("totalDuration" in a && "totalDuration" in b) {
-            return (a.totalDuration || 0) - (b.totalDuration || 0);
-          }
-          return 0;
-        case "departure-asc":
-          if ("departureAt" in a && "departureAt" in b) {
-            return (
-              new Date(a.departureAt).getTime() -
-              new Date(b.departureAt).getTime()
-            );
-          }
-          return 0;
-        default:
-          return 0;
+    const filtered = nextOffers.filter((offer) => {
+      if (searchType === "flight" && selectedCabinClass) {
+        return "cabinClass" in offer && offer.cabinClass === selectedCabinClass;
       }
+
+      if (searchType === "hotel" && selectedRoomTier) {
+        return "roomTier" in offer && offer.roomTier === selectedRoomTier;
+      }
+
+      return true;
+    });
+
+    filtered.sort((left, right) => {
+      if (sortBy === "price-asc") {
+        return Number(left.totalAmount) - Number(right.totalAmount);
+      }
+
+      if (sortBy === "price-desc") {
+        return Number(right.totalAmount) - Number(left.totalAmount);
+      }
+
+      if (sortBy === "duration-asc") {
+        if ("duration" in left && "duration" in right) {
+          return parseDurationToMinutes(left.duration) - parseDurationToMinutes(right.duration);
+        }
+
+        return 0;
+      }
+
+      if ("departDate" in left && "departDate" in right) {
+        return (
+          new Date(left.departDate).getTime() - new Date(right.departDate).getTime()
+        );
+      }
+
+      return 0;
     });
 
     setFilteredOffers(filtered);
-  };
+  }
 
-  const handleSelectOffer = (offer: FlightBookingOffer | HotelBookingOffer) => {
-    setSelectedOffer(offer);
-    router.push("/trips/booking-details");
-  };
-
-  const handleRefresh = () => {
-    setRefreshing(true);
-    void fetchResults();
-  };
-
-  const clearFilters = () => {
+  function clearFilters() {
     setSelectedCabinClass(null);
     setSelectedRoomTier(null);
-  };
+  }
 
-  const renderOfferCard = ({
+  function handleRefresh() {
+    setRefreshing(true);
+    void fetchResults();
+  }
+
+  function handleSelectOffer(offer: FlightBookingOffer | HotelBookingOffer) {
+    setSelectedOffer(offer);
+    router.push("/trips/booking-details");
+  }
+
+  function renderOfferCard({
     item,
   }: {
     item: FlightBookingOffer | HotelBookingOffer;
-  }) => {
+  }) {
     if ("originCode" in item) {
-      // Flight offer
-      // Extract airline code from flight number (e.g., "AA123" -> "AA")
-      const airlineCode = item.flightNumber?.match(/^[A-Z]{2}/)?.[0] || "XX";
+      const airlineCode = item.flightNumber.match(/^[A-Z]{2}/)?.[0] || "XX";
       const airlineLogoUrl = `https://images.kiwi.com/airlines/64/${airlineCode}.png`;
 
       return (
-        <Pressable
-          style={styles.offerCard}
-          onPress={() => handleSelectOffer(item)}
-        >
+        <Pressable style={styles.offerCard} onPress={() => handleSelectOffer(item)}>
           <View style={styles.offerHeader}>
             <Image
               source={{ uri: airlineLogoUrl }}
@@ -325,12 +263,12 @@ export default function SearchResultsScreen() {
                 {item.originCode} → {item.destinationCode}
               </Text>
               <Text variant="caption" color="secondary">
-                {item.carrierName || "Airline"} · {item.flightNumber || ""}
+                {item.carrierName} · {item.flightNumber}
               </Text>
             </View>
             <View style={styles.priceInfo}>
-              <Text variant="h5" weight="bold">
-                ${item.totalAmount}
+              <Text variant="h4" weight="bold">
+                {item.totalAmount}
               </Text>
               <Text variant="caption" color="secondary">
                 {item.currency}
@@ -349,18 +287,16 @@ export default function SearchResultsScreen() {
                 {new Date(item.departDate).toLocaleDateString()}
               </Text>
             </View>
-            {item.duration && (
-              <View style={styles.detailRow}>
-                <Ionicons
-                  name="time-outline"
-                  size={16}
-                  color={colors.text.secondary}
-                />
-                <Text variant="caption" color="secondary">
-                  {item.duration}
-                </Text>
-              </View>
-            )}
+            <View style={styles.detailRow}>
+              <Ionicons
+                name="time-outline"
+                size={16}
+                color={colors.text.secondary}
+              />
+              <Text variant="caption" color="secondary">
+                {item.duration}
+              </Text>
+            </View>
             <View style={styles.detailRow}>
               <Ionicons
                 name="airplane-outline"
@@ -368,65 +304,72 @@ export default function SearchResultsScreen() {
                 color={colors.text.secondary}
               />
               <Text variant="caption" color="secondary">
-                {item.cabinClass}
-              </Text>
-            </View>
-          </View>
-        </Pressable>
-      );
-    } else {
-      // Hotel offer
-      return (
-        <Pressable
-          style={styles.offerCard}
-          onPress={() => handleSelectOffer(item)}
-        >
-          <View style={styles.offerHeader}>
-            <View style={styles.routeInfo}>
-              <Text variant="body" weight="semiBold">
-                {item.hotelName}
-              </Text>
-              <Text variant="caption" color="secondary">
-                {item.city}
-              </Text>
-            </View>
-            <View style={styles.priceInfo}>
-              <Text variant="h5" weight="bold">
-                ${item.totalAmount}
-              </Text>
-              <Text variant="caption" color="secondary">
-                {item.totalCurrency}
-              </Text>
-            </View>
-          </View>
-
-          <View style={styles.offerDetails}>
-            <View style={styles.detailRow}>
-              <Ionicons
-                name="bed-outline"
-                size={16}
-                color={colors.text.secondary}
-              />
-              <Text variant="caption" color="secondary">
-                {item.roomTier} · {item.rooms} room(s)
-              </Text>
-            </View>
-            <View style={styles.detailRow}>
-              <Ionicons
-                name="calendar-outline"
-                size={16}
-                color={colors.text.secondary}
-              />
-              <Text variant="caption" color="secondary">
-                {new Date(item.checkIn).toLocaleDateString()} -{" "}
-                {new Date(item.checkOut).toLocaleDateString()}
+                {item.cabinClass} · {item.travelerCount} traveller
+                {item.travelerCount === 1 ? "" : "s"}
               </Text>
             </View>
           </View>
         </Pressable>
       );
     }
-  };
+
+    return (
+      <Pressable style={styles.offerCard} onPress={() => handleSelectOffer(item)}>
+        <View style={styles.offerHeader}>
+          <View style={styles.routeInfo}>
+            <Text variant="body" weight="semiBold">
+              {item.hotelName}
+            </Text>
+            <Text variant="caption" color="secondary">
+              {item.cityLabel}
+            </Text>
+          </View>
+          <View style={styles.priceInfo}>
+            <Text variant="h4" weight="bold">
+              {item.totalAmount}
+            </Text>
+            <Text variant="caption" color="secondary">
+              {item.currency}
+            </Text>
+          </View>
+        </View>
+
+        <View style={styles.offerDetails}>
+          <View style={styles.detailRow}>
+            <Ionicons
+              name="bed-outline"
+              size={16}
+              color={colors.text.secondary}
+            />
+            <Text variant="caption" color="secondary">
+              {item.roomTier} · {item.roomCount} room{item.roomCount === 1 ? "" : "s"}
+            </Text>
+          </View>
+          <View style={styles.detailRow}>
+            <Ionicons
+              name="calendar-outline"
+              size={16}
+              color={colors.text.secondary}
+            />
+            <Text variant="caption" color="secondary">
+              {new Date(item.checkInDate).toLocaleDateString()} -{" "}
+              {new Date(item.checkOutDate).toLocaleDateString()}
+            </Text>
+          </View>
+          <View style={styles.detailRow}>
+            <Ionicons
+              name="business-outline"
+              size={16}
+              color={colors.text.secondary}
+            />
+            <Text variant="caption" color="secondary">
+              {item.providerName}
+            </Text>
+          </View>
+        </View>
+      </Pressable>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -441,13 +384,7 @@ export default function SearchResultsScreen() {
             variant="ghost"
             size="sm"
             onPress={() => router.back()}
-            icon={
-              <Ionicons
-                name="arrow-back"
-                size={24}
-                color={colors.text.primary}
-              />
-            }
+            icon={<Ionicons name="arrow-back" size={24} color={colors.text.primary} />}
           />
           <Text variant="h4">Search Results</Text>
         </View>
@@ -456,9 +393,7 @@ export default function SearchResultsScreen() {
             variant="ghost"
             size="sm"
             onPress={() => setShowFilters(true)}
-            icon={
-              <Ionicons name="filter" size={20} color={colors.text.primary} />
-            }
+            icon={<Ionicons name="filter" size={20} color={colors.text.primary} />}
           />
           <IconButton
             variant="ghost"
@@ -478,8 +413,8 @@ export default function SearchResultsScreen() {
       {isLoading && !refreshing ? (
         <View style={styles.centerContent}>
           <ActivityIndicator size="large" color={colors.brand.default} />
-          <Text variant="body" color="secondary" style={{ marginTop: spacing[3] }}>
-            Searching for {searchType === "flight" ? "flights" : "hotels"}...
+          <Text variant="body" color="secondary" style={styles.messageText}>
+            Searching for {searchType === "flight" ? "flights" : "stays"}...
           </Text>
         </View>
       ) : error ? (
@@ -489,7 +424,12 @@ export default function SearchResultsScreen() {
             size={48}
             color={colors.status.error}
           />
-          <Text variant="body" color="secondary" align="center" style={{ marginTop: spacing[3] }}>
+          <Text
+            variant="body"
+            color="secondary"
+            align="center"
+            style={styles.messageText}
+          >
             {error}
           </Text>
           <Button
@@ -507,8 +447,13 @@ export default function SearchResultsScreen() {
             size={48}
             color={colors.text.tertiary}
           />
-          <Text variant="body" color="secondary" align="center" style={{ marginTop: spacing[3] }}>
-            No results found. Try adjusting your filters.
+          <Text
+            variant="body"
+            color="secondary"
+            align="center"
+            style={styles.messageText}
+          >
+            No results found. Try adjusting the filters or search again.
           </Text>
           {(selectedCabinClass || selectedRoomTier) && (
             <Button
@@ -524,7 +469,7 @@ export default function SearchResultsScreen() {
         <FlatList
           data={filteredOffers}
           renderItem={renderOfferCard}
-          keyExtractor={(item) => ("offerId" in item ? item.offerId : item.id)}
+          keyExtractor={(item) => item.offerId}
           contentContainerStyle={styles.listContent}
           refreshControl={
             <RefreshControl
@@ -536,11 +481,10 @@ export default function SearchResultsScreen() {
         />
       )}
 
-      {/* Filter Modal */}
       <Modal
         visible={showFilters}
-        animationType="slide"
         transparent
+        animationType="slide"
         onRequestClose={() => setShowFilters(false)}
       >
         <Pressable style={styles.modalOverlay} onPress={() => setShowFilters(false)}>
@@ -549,7 +493,7 @@ export default function SearchResultsScreen() {
               styles.modalContent,
               { paddingBottom: insets.bottom + spacing[4] },
             ]}
-            onPress={(e) => e.stopPropagation()}
+            onPress={(event) => event.stopPropagation()}
           >
             <View style={styles.modalHeader}>
               <Text variant="h4">Filters</Text>
@@ -557,13 +501,7 @@ export default function SearchResultsScreen() {
                 variant="ghost"
                 size="sm"
                 onPress={() => setShowFilters(false)}
-                icon={
-                  <Ionicons
-                    name="close"
-                    size={24}
-                    color={colors.text.primary}
-                  />
-                }
+                icon={<Ionicons name="close" size={24} color={colors.text.primary} />}
               />
             </View>
 
@@ -571,27 +509,24 @@ export default function SearchResultsScreen() {
               <View style={styles.filterSection}>
                 <Text variant="label">Cabin Class</Text>
                 <View style={styles.filterOptions}>
-                  {(["economy", "premium", "business"] as const).map((cabin) => (
+                  {(["economy", "premium", "business"] as const).map((option) => (
                     <Pressable
-                      key={cabin}
+                      key={option}
                       style={[
                         styles.filterOption,
-                        selectedCabinClass === cabin &&
-                          styles.filterOptionActive,
+                        selectedCabinClass === option && styles.filterOptionActive,
                       ]}
                       onPress={() =>
                         setSelectedCabinClass(
-                          selectedCabinClass === cabin ? null : cabin
+                          selectedCabinClass === option ? null : option
                         )
                       }
                     >
                       <Text
                         variant="body"
-                        weight={
-                          selectedCabinClass === cabin ? "semiBold" : "regular"
-                        }
+                        weight={selectedCabinClass === option ? "semiBold" : "regular"}
                       >
-                        {cabin.charAt(0).toUpperCase() + cabin.slice(1)}
+                        {option.charAt(0).toUpperCase() + option.slice(1)}
                       </Text>
                     </Pressable>
                   ))}
@@ -601,24 +536,22 @@ export default function SearchResultsScreen() {
               <View style={styles.filterSection}>
                 <Text variant="label">Room Type</Text>
                 <View style={styles.filterOptions}>
-                  {(["standard", "deluxe", "suite"] as const).map((tier) => (
+                  {(["standard", "deluxe", "suite"] as const).map((option) => (
                     <Pressable
-                      key={tier}
+                      key={option}
                       style={[
                         styles.filterOption,
-                        selectedRoomTier === tier && styles.filterOptionActive,
+                        selectedRoomTier === option && styles.filterOptionActive,
                       ]}
                       onPress={() =>
-                        setSelectedRoomTier(
-                          selectedRoomTier === tier ? null : tier
-                        )
+                        setSelectedRoomTier(selectedRoomTier === option ? null : option)
                       }
                     >
                       <Text
                         variant="body"
-                        weight={selectedRoomTier === tier ? "semiBold" : "regular"}
+                        weight={selectedRoomTier === option ? "semiBold" : "regular"}
                       >
-                        {tier.charAt(0).toUpperCase() + tier.slice(1)}
+                        {option.charAt(0).toUpperCase() + option.slice(1)}
                       </Text>
                     </Pressable>
                   ))}
@@ -627,11 +560,7 @@ export default function SearchResultsScreen() {
             )}
 
             <View style={styles.modalFooter}>
-              <Button
-                variant="ghost"
-                onPress={clearFilters}
-                style={styles.modalButton}
-              >
+              <Button variant="ghost" onPress={clearFilters} style={styles.modalButton}>
                 Clear
               </Button>
               <Button
@@ -646,11 +575,10 @@ export default function SearchResultsScreen() {
         </Pressable>
       </Modal>
 
-      {/* Sort Modal */}
       <Modal
         visible={showSort}
-        animationType="slide"
         transparent
+        animationType="slide"
         onRequestClose={() => setShowSort(false)}
       >
         <Pressable style={styles.modalOverlay} onPress={() => setShowSort(false)}>
@@ -659,7 +587,7 @@ export default function SearchResultsScreen() {
               styles.modalContent,
               { paddingBottom: insets.bottom + spacing[4] },
             ]}
-            onPress={(e) => e.stopPropagation()}
+            onPress={(event) => event.stopPropagation()}
           >
             <View style={styles.modalHeader}>
               <Text variant="h4">Sort By</Text>
@@ -667,13 +595,7 @@ export default function SearchResultsScreen() {
                 variant="ghost"
                 size="sm"
                 onPress={() => setShowSort(false)}
-                icon={
-                  <Ionicons
-                    name="close"
-                    size={24}
-                    color={colors.text.primary}
-                  />
-                }
+                icon={<Ionicons name="close" size={24} color={colors.text.primary} />}
               />
             </View>
 
@@ -705,13 +627,13 @@ export default function SearchResultsScreen() {
                   >
                     {option.label}
                   </Text>
-                  {sortBy === option.value && (
+                  {sortBy === option.value ? (
                     <Ionicons
                       name="checkmark"
                       size={20}
                       color={colors.brand.default}
                     />
-                  )}
+                  ) : null}
                 </Pressable>
               ))}
             </View>
@@ -732,9 +654,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     paddingHorizontal: spacing[5],
-    backgroundColor: colors.background.primary,
     borderBottomWidth: 1,
     borderBottomColor: colors.border.default,
+    backgroundColor: colors.background.primary,
   },
   headerLeft: {
     flexDirection: "row",
@@ -752,6 +674,9 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     paddingHorizontal: spacing[5],
   },
+  messageText: {
+    marginTop: spacing[3],
+  },
   listContent: {
     padding: spacing[5],
     gap: spacing[3],
@@ -760,14 +685,13 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background.primary,
     borderRadius: borderRadius.xl,
     padding: spacing[4],
-    gap: spacing[3],
     borderWidth: 1,
     borderColor: colors.border.default,
+    gap: spacing[3],
   },
   offerHeader: {
     flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
+    alignItems: "center",
     gap: spacing[3],
   },
   airlineLogo: {
@@ -778,10 +702,11 @@ const styles = StyleSheet.create({
   },
   routeInfo: {
     flex: 1,
-    gap: spacing[1],
+    gap: spacing[0.5],
   },
   priceInfo: {
     alignItems: "flex-end",
+    gap: spacing[0.5],
   },
   offerDetails: {
     flexDirection: "row",
@@ -795,43 +720,46 @@ const styles = StyleSheet.create({
   },
   modalOverlay: {
     flex: 1,
-    backgroundColor: "rgba(0, 0, 0, 0.5)",
     justifyContent: "flex-end",
+    backgroundColor: colors.background.overlay,
   },
   modalContent: {
     backgroundColor: colors.background.primary,
     borderTopLeftRadius: borderRadius["2xl"],
     borderTopRightRadius: borderRadius["2xl"],
-    padding: spacing[6],
+    paddingHorizontal: spacing[5],
+    paddingTop: spacing[5],
     gap: spacing[4],
   },
   modalHeader: {
     flexDirection: "row",
-    justifyContent: "space-between",
     alignItems: "center",
+    justifyContent: "space-between",
   },
   filterSection: {
     gap: spacing[3],
   },
   filterOptions: {
+    flexDirection: "row",
+    flexWrap: "wrap",
     gap: spacing[2],
   },
   filterOption: {
-    paddingVertical: spacing[3],
+    minWidth: 112,
     paddingHorizontal: spacing[4],
-    borderRadius: borderRadius.lg,
+    paddingVertical: spacing[3],
+    borderRadius: borderRadius.full,
     borderWidth: 1,
     borderColor: colors.border.default,
     backgroundColor: colors.background.primary,
   },
   filterOptionActive: {
     borderColor: colors.brand.default,
-    backgroundColor: colors.brand.subtle,
+    backgroundColor: colors.brand.light,
   },
   modalFooter: {
     flexDirection: "row",
     gap: spacing[3],
-    marginTop: spacing[2],
   },
   modalButton: {
     flex: 1,
@@ -841,16 +769,14 @@ const styles = StyleSheet.create({
   },
   sortOption: {
     flexDirection: "row",
-    justifyContent: "space-between",
     alignItems: "center",
-    paddingVertical: spacing[3],
+    justifyContent: "space-between",
     paddingHorizontal: spacing[4],
-    borderRadius: borderRadius.lg,
-    borderWidth: 1,
-    borderColor: colors.border.default,
+    paddingVertical: spacing[3],
+    borderRadius: borderRadius.xl,
+    backgroundColor: colors.background.secondary,
   },
   sortOptionActive: {
-    borderColor: colors.brand.default,
-    backgroundColor: colors.brand.subtle,
+    backgroundColor: colors.brand.light,
   },
 });

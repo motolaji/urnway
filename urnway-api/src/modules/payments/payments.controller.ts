@@ -2,26 +2,32 @@ import type { RequestHandler } from 'express';
 
 import { fail, ok } from '../../utils/api-response.js';
 import {
+  completeSendCheckoutSchema,
   completeNearbyPaymentIntentSchema,
   createNearbyPaymentIntentSchema,
   createPaymentQrSchema,
   createPaymentLinkSchema,
+  prepareSendCheckoutSchema,
   resetPaymentLinkSchema,
+  sendCheckoutIdSchema,
   sendPaymentSchema,
   submitPaymentLinkSchema,
 } from './payments.schema.js';
 import {
+  completeSendCheckout,
   completeNearbyPaymentIntent,
   createNearbyPaymentIntent,
   createPaymentLink,
   deleteUserPaymentLink,
   generatePaymentQr,
+  getSendCheckoutStatus,
   getNearbyPaymentIntent,
   getPublicPaymentQr,
   getPaymentsOverview,
   getPublicPaymentLink,
   listUserPaymentLinks,
   preflightDirectSendPayment,
+  prepareSendCheckout,
   preflightPaymentQrPayment,
   preflightPaymentLinkPayment,
   resetPaymentLink,
@@ -156,6 +162,64 @@ export const preflightDirectSendHandler: RequestHandler = (req, res) => {
 
     return Promise.resolve(
       preflightDirectSendPayment(getUserFromRequest(req), input)
+    ).then((data) => {
+      res.json(ok(data));
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Authenticated user missing from request') {
+      res.status(401).json(fail(error.message));
+      return;
+    }
+
+    throw error;
+  }
+};
+
+export const prepareSendCheckoutHandler: RequestHandler = (req, res) => {
+  try {
+    const input = prepareSendCheckoutSchema.parse(req.body);
+
+    return Promise.resolve(
+      prepareSendCheckout(getUserFromRequest(req), input)
+    ).then((data) => {
+      res.status(201).json(ok(data));
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Authenticated user missing from request') {
+      res.status(401).json(fail(error.message));
+      return;
+    }
+
+    throw error;
+  }
+};
+
+export const getSendCheckoutHandler: RequestHandler = (req, res) => {
+  try {
+    const { checkoutId } = sendCheckoutIdSchema.parse(req.params);
+
+    return Promise.resolve(
+      getSendCheckoutStatus(getUserFromRequest(req), checkoutId)
+    ).then((data) => {
+      res.json(ok(data));
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Authenticated user missing from request') {
+      res.status(401).json(fail(error.message));
+      return;
+    }
+
+    throw error;
+  }
+};
+
+export const completeSendCheckoutHandler: RequestHandler = (req, res) => {
+  try {
+    const { checkoutId } = sendCheckoutIdSchema.parse(req.params);
+    const input = completeSendCheckoutSchema.parse(req.body ?? {});
+
+    return Promise.resolve(
+      completeSendCheckout(getUserFromRequest(req), checkoutId, input)
     ).then((data) => {
       res.json(ok(data));
     });

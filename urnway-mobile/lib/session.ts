@@ -3,11 +3,15 @@ import { Platform } from "react-native";
 
 import type {
   AuthPayload,
+  BalanceAccount,
+  BalanceTopup,
   BoardingPass,
+  BookingCheckout,
   Booking,
   CreateNearbyPaymentIntentInput,
   DirectSendPreflight,
   FlightBookingOffer,
+  FundingPlan,
   GeneratedTripItineraryDraft,
   HotelBookingOffer,
   LocationSuggestion,
@@ -15,11 +19,14 @@ import type {
   NearbyPaymentIntent,
   PaymentLink,
   PaymentLinkPreflight,
+  PaymentSource,
   PaymentQrRequest,
+  SendCheckout,
   Trip,
   TripExpense,
   TripItineraryDraft,
   TripItineraryItem,
+  UrnwayBalanceSummary,
   VaultGoal,
 } from "@urnway/contracts";
 import {
@@ -33,11 +40,15 @@ const BOARDING_PASS_CACHE_PREFIX = "urnway.boarding-pass";
 const BOARDING_PASS_CACHE_LIMIT = 8;
 
 export type {
+  BalanceAccount,
+  BalanceTopup,
   BoardingPass,
+  BookingCheckout,
   Booking,
   CreateNearbyPaymentIntentInput,
   DirectSendPreflight,
   FlightBookingOffer,
+  FundingPlan,
   GeneratedTripItineraryDraft,
   HotelBookingOffer,
   LocationSuggestion,
@@ -45,11 +56,14 @@ export type {
   NearbyPaymentIntent,
   PaymentLink,
   PaymentLinkPreflight,
+  PaymentSource,
   PaymentQrRequest,
+  SendCheckout,
   Trip,
   TripExpense,
   TripItineraryDraft,
   TripItineraryItem,
+  UrnwayBalanceSummary,
   VaultGoal,
 } from "@urnway/contracts";
 
@@ -249,6 +263,40 @@ type PaymentQrPreflight = {
 
 type NearbyPaymentIntentResponse = {
   paymentIntent: NearbyPaymentIntent;
+};
+
+type UrnwayBalanceResponse = {
+  balance: UrnwayBalanceSummary;
+};
+
+type BalanceTopupResponse = {
+  topup: BalanceTopup;
+};
+
+type PrepareBalanceTopupResponse = {
+  topup: BalanceTopup;
+  funding: {
+    preflight: PaymentLinkPreflight["preflight"];
+  };
+};
+
+type SendCheckoutResponse = {
+  checkout: SendCheckout & {
+    recipient?: {
+      userId: string;
+      publicUserId: string | null;
+      username: string | null;
+      displayName: string;
+      walletAddress: string;
+    };
+  };
+  balance?: BalanceAccount;
+};
+
+type BookingCheckoutResponse = {
+  checkout: BookingCheckout;
+  booking?: Booking;
+  balance?: BalanceAccount;
 };
 
 type ApiEnvelope<T> = {
@@ -465,6 +513,47 @@ export function fetchWalletBalance(accessToken: string) {
   }).then((data) => data.summary);
 }
 
+export function fetchUrnwayBalance(accessToken: string) {
+  return apiRequest<UrnwayBalanceResponse>("/v1/balance", {
+    accessToken,
+  }).then((data) => data.balance);
+}
+
+export function prepareBalanceTopup(
+  input: {
+    amountMinor: number;
+    currency: string;
+  },
+  accessToken: string
+) {
+  return apiRequest<PrepareBalanceTopupResponse>("/v1/balance/topups/prepare", {
+    method: "POST",
+    body: input,
+    accessToken,
+  });
+}
+
+export function submitBalanceTopup(
+  topupId: string,
+  input: {
+    txHash: string;
+    senderWalletAddress: string;
+  },
+  accessToken: string
+) {
+  return apiRequest<BalanceTopupResponse>(`/v1/balance/topups/${topupId}/submit`, {
+    method: "POST",
+    body: input,
+    accessToken,
+  }).then((data) => data.topup);
+}
+
+export function fetchBalanceTopup(topupId: string, accessToken: string) {
+  return apiRequest<BalanceTopupResponse>(`/v1/balance/topups/${topupId}`, {
+    accessToken,
+  }).then((data) => data.topup);
+}
+
 export function fetchWalletPosition(accessToken: string) {
   return apiRequest<WalletPositionResponse>("/v1/wallet/position", {
     accessToken,
@@ -673,6 +762,45 @@ export function createFlightBooking(
   }).then((data) => data.booking);
 }
 
+export function prepareBookingCheckout(
+  input:
+    | {
+        mode: "flight";
+        source: PaymentSource;
+        booking: {
+          offer: FlightBookingOffer;
+          passengerName: string;
+          bornOn?: string;
+          email?: string;
+          phoneNumber?: string;
+          title?: "mr" | "mrs" | "ms" | "miss" | "mx" | "dr";
+          gender?: "m" | "f" | "x";
+          tripId?: string;
+          note?: string;
+        };
+      }
+    | {
+        mode: "hotel";
+        source: PaymentSource;
+        booking: {
+          offer: HotelBookingOffer;
+          guestName: string;
+          bornOn?: string;
+          email?: string;
+          phoneNumber?: string;
+          tripId?: string;
+          note?: string;
+        };
+      },
+  accessToken: string
+) {
+  return apiRequest<BookingCheckoutResponse>("/v1/bookings/checkout/prepare", {
+    method: "POST",
+    body: input,
+    accessToken,
+  });
+}
+
 export function searchHotelBookingOffers(
   input: {
     city: string;
@@ -707,6 +835,23 @@ export function createHotelBooking(
     body: input,
     accessToken,
   }).then((data) => data.booking);
+}
+
+export function completeBookingCheckout(
+  checkoutId: string,
+  input: {
+    topupId?: string;
+  },
+  accessToken: string
+) {
+  return apiRequest<BookingCheckoutResponse>(
+    `/v1/bookings/checkout/${checkoutId}/complete`,
+    {
+      method: "POST",
+      body: input,
+      accessToken,
+    }
+  );
 }
 
 export function fetchLocationSuggestions(
@@ -1007,6 +1152,47 @@ export function preflightDirectSend(
     body: input,
     accessToken,
   });
+}
+
+export function prepareSendCheckout(
+  input: {
+    username?: string;
+    receiverPublicUserId?: string;
+    amountMinor: number;
+    currency: string;
+    source: PaymentSource;
+    note?: string;
+  },
+  accessToken: string
+) {
+  return apiRequest<SendCheckoutResponse>("/v1/payments/send/prepare", {
+    method: "POST",
+    body: input,
+    accessToken,
+  });
+}
+
+export function fetchSendCheckout(checkoutId: string, accessToken: string) {
+  return apiRequest<SendCheckoutResponse>(`/v1/payments/send/${checkoutId}`, {
+    accessToken,
+  });
+}
+
+export function completeSendCheckout(
+  checkoutId: string,
+  input: {
+    topupId?: string;
+  },
+  accessToken: string
+) {
+  return apiRequest<SendCheckoutResponse>(
+    `/v1/payments/send/${checkoutId}/complete`,
+    {
+      method: "POST",
+      body: input,
+      accessToken,
+    }
+  );
 }
 
 export function createNearbyPaymentIntent(

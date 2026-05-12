@@ -27,6 +27,9 @@ type CreateBookingRecordInput = {
   passengerName: string;
   totalAmount: string;
   currency?: string;
+  paymentSource?: string | null;
+  fundedAmount?: string | null;
+  fundedCurrency?: string | null;
   bookingReference: string;
   note?: string | null;
   cancellationPolicy?: string;
@@ -91,6 +94,9 @@ export async function createBookingRecord(input: CreateBookingRecordInput) {
       passengerName: input.passengerName,
       totalAmount: input.totalAmount,
       currency: input.currency ?? 'MUSD',
+      paymentSource: input.paymentSource ?? null,
+      fundedAmount: input.fundedAmount ?? null,
+      fundedCurrency: input.fundedCurrency ?? null,
       bookingReference: input.bookingReference,
       note: input.note ?? null,
       cancellationPolicy: input.cancellationPolicy ?? 'Flexible refund policy',

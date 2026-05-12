@@ -447,8 +447,6 @@ export default function TripsScreen() {
           setCheckOut(nextValue);
           return;
         }
-
-        setPassengerBornOn(nextValue);
       },
     });
   }

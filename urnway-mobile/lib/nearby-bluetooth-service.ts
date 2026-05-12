@@ -175,14 +175,18 @@ export async function requestNearbyPermissions(mode: "scan" | "advertise") {
 }
 
 export class NearbyBluetoothService {
+  private static readonly STALE_USER_TTL_MS = 12_000;
+  private static readonly STALE_USER_PRUNE_INTERVAL_MS = 3_000;
   private manager: BleManager | null = null;
   private readonly discoveredUsers = new Map<string, NearbyUser>();
+  private readonly lastSeenAtByPublicUserId = new Map<string, number>();
   private scanActive = false;
   private discoverableActive = false;
   private activeDevice: Device | null = null;
   private statusMonitor: Subscription | null = null;
   private peripheralWriteSubscription: { remove(): void } | null = null;
   private advertisingStateSubscription: { remove(): void } | null = null;
+  private staleUserPruneTimer: ReturnType<typeof setInterval> | null = null;
 
   async getState() {
     return this.getManager().state();
@@ -253,10 +257,6 @@ export class NearbyBluetoothService {
   }
 
   supportsDiscoverableMode() {
-    if (Platform.OS === "ios") {
-      return false;
-    }
-
     return hasNativeBluetoothPeripheralSupport();
   }
 
@@ -264,6 +264,7 @@ export class NearbyBluetoothService {
     this.scanActive = true;
     try {
       const manager = this.getManager();
+      this.startStaleUserPruner(options);
       manager.stopDeviceScan();
       manager.startDeviceScan(
         null,
@@ -293,6 +294,7 @@ export class NearbyBluetoothService {
 
           const currentStatus =
             this.discoveredUsers.get(payload.publicUserId)?.status ?? "discovered";
+          const seenAt = Date.now();
 
           this.discoveredUsers.set(payload.publicUserId, {
             username: payload.username,
@@ -301,12 +303,9 @@ export class NearbyBluetoothService {
             deviceId: device.id,
             status: currentStatus,
           });
+          this.lastSeenAtByPublicUserId.set(payload.publicUserId, seenAt);
 
-          options.onUsersUpdated(
-            Array.from(this.discoveredUsers.values()).sort(
-              (left, right) => (right.rssi ?? -200) - (left.rssi ?? -200)
-            )
-          );
+          options.onUsersUpdated(this.getSortedNearbyUsers());
         }
       );
     } catch (error) {
@@ -318,6 +317,8 @@ export class NearbyBluetoothService {
     this.scanActive = false;
     this.manager?.stopDeviceScan();
     this.discoveredUsers.clear();
+    this.lastSeenAtByPublicUserId.clear();
+    this.stopStaleUserPruner();
   }
 
   startDiscoverable(options: StartDiscoverableOptions) {
@@ -601,5 +602,43 @@ export class NearbyBluetoothService {
     }
 
     return this.manager;
+  }
+
+  private getSortedNearbyUsers() {
+    return Array.from(this.discoveredUsers.values()).sort(
+      (left, right) => (right.rssi ?? -200) - (left.rssi ?? -200)
+    );
+  }
+
+  private startStaleUserPruner(options: StartScanningOptions) {
+    this.stopStaleUserPruner();
+    this.staleUserPruneTimer = setInterval(() => {
+      if (!this.scanActive) {
+        return;
+      }
+
+      const cutoff = Date.now() - NearbyBluetoothService.STALE_USER_TTL_MS;
+      let changed = false;
+
+      for (const [publicUserId, lastSeenAt] of this.lastSeenAtByPublicUserId.entries()) {
+        if (lastSeenAt >= cutoff) {
+          continue;
+        }
+
+        this.lastSeenAtByPublicUserId.delete(publicUserId);
+        changed = this.discoveredUsers.delete(publicUserId) || changed;
+      }
+
+      if (changed) {
+        options.onUsersUpdated(this.getSortedNearbyUsers());
+      }
+    }, NearbyBluetoothService.STALE_USER_PRUNE_INTERVAL_MS);
+  }
+
+  private stopStaleUserPruner() {
+    if (this.staleUserPruneTimer) {
+      clearInterval(this.staleUserPruneTimer);
+      this.staleUserPruneTimer = null;
+    }
   }
 }

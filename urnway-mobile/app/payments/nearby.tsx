@@ -1,12 +1,17 @@
 import { Ionicons } from "@expo/vector-icons";
 import { router, type Href } from "expo-router";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Platform, StyleSheet, View } from "react-native";
+import { Pressable, StyleSheet, View } from "react-native";
 import { State } from "react-native-ble-plx";
 
 import BlurScrollScreen from "@/components/blur-scroll-screen";
 import { Button, Card, Input, Text, Toggle } from "@/components/ui";
-import { colors, spacing, typography } from "@/constants/design-tokens";
+import {
+  borderRadius,
+  colors,
+  spacing,
+  typography,
+} from "@/constants/design-tokens";
 import {
   getBluetoothStateErrorMessage,
   getNearbyPermissionErrorMessage,
@@ -18,22 +23,31 @@ import {
   parseMajorAmountToMinorUnits,
   type IncomingNearbyPayment,
   type NearbyDoneMessage,
+  type NearbyAckMessage,
   type NearbyUser,
 } from "@/lib/nearby-payments";
 import {
-  completeNearbyPaymentIntent,
-  createNearbyPaymentIntent,
-  fetchNearbyPaymentIntent,
+  completeSendCheckout,
+  fetchSendCheckout,
+  fetchUrnwayBalance,
+  prepareSendCheckout,
+  type PaymentSource,
+  type UrnwayBalanceSummary,
 } from "@/lib/session";
+import { isCompletedTopup, runUrnwayTopupFlow } from "@/lib/topup-flow";
 import { useSession } from "@/providers/session-provider";
 
 type SenderFlowState = {
   user: NearbyUser;
-  paymentIntentId: string;
+  checkoutId: string;
+  paymentSource: PaymentSource;
+  topupId: string | null;
   amountMinor: number;
   currency: string;
-  status: "connecting" | "awaiting_ack" | "acked" | "completed";
+  status: "connecting" | "awaiting_ack" | "acked" | "completed" | "failed";
 };
+
+const ACK_TIMEOUT_MS = 20_000;
 
 function formatNearbyListShortPublicId(publicUserId: string) {
   const normalized = publicUserId.startsWith("pub_")
@@ -47,10 +61,15 @@ export default function NearbyPaymentsScreen() {
   const { profile, status, tokens } = useSession();
   const serviceRef = useRef<NearbyBluetoothService | null>(null);
   const incomingPaymentRef = useRef<IncomingNearbyPayment | null>(null);
+  const senderFlowRef = useRef<SenderFlowState | null>(null);
+  const ackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [nearbyUsers, setNearbyUsers] = useState<NearbyUser[]>([]);
+  const [balance, setBalance] = useState<UrnwayBalanceSummary | null>(null);
+  const [paymentSource, setPaymentSource] =
+    useState<PaymentSource>("urnway_balance");
   const [discoverableEnabled, setDiscoverableEnabled] = useState(false);
   const [amount, setAmount] = useState("10.00");
-  const [currency, setCurrency] = useState("GBP");
+  const [currency] = useState("MUSD");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [isScanning, setIsScanning] = useState(false);
@@ -66,6 +85,7 @@ export default function NearbyPaymentsScreen() {
   const [isCompletingSenderFlow, setIsCompletingSenderFlow] = useState(false);
   const profileUsername = profile?.username ?? null;
   const publicUserId = profile?.publicUserId ?? null;
+  const treasuryReady = Boolean(balance?.treasuryWalletAddress);
 
   function getUiErrorMessage(error: unknown, fallback: string) {
     if (error instanceof Error && error.message) {
@@ -104,6 +124,63 @@ export default function NearbyPaymentsScreen() {
   }, [incomingPayment]);
 
   useEffect(() => {
+    senderFlowRef.current = senderFlow;
+  }, [senderFlow]);
+
+  useEffect(() => {
+    return () => {
+      if (ackTimeoutRef.current) {
+        clearTimeout(ackTimeoutRef.current);
+        ackTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (ackTimeoutRef.current) {
+      clearTimeout(ackTimeoutRef.current);
+      ackTimeoutRef.current = null;
+    }
+
+    if (senderFlow?.status !== "awaiting_ack") {
+      return;
+    }
+
+    ackTimeoutRef.current = setTimeout(() => {
+      const currentFlow = senderFlowRef.current;
+
+      if (!currentFlow || currentFlow.status !== "awaiting_ack") {
+        return;
+      }
+
+      updateNearbyUserStatus(currentFlow.user.publicUserId, "discovered");
+      void getService().disconnectActiveConnection();
+      setSenderFlow({
+        ...currentFlow,
+        status: "failed",
+      });
+      setErrorMessage("Nearby device did not acknowledge the payment in time.");
+      setStatusMessage(null);
+    }, ACK_TIMEOUT_MS);
+
+    return () => {
+      if (ackTimeoutRef.current) {
+        clearTimeout(ackTimeoutRef.current);
+        ackTimeoutRef.current = null;
+      }
+    };
+  }, [senderFlow?.status]);
+
+  async function refreshBalance(accessToken: string) {
+    try {
+      const nextBalance = await fetchUrnwayBalance(accessToken);
+      setBalance(nextBalance);
+    } catch {
+      // Keep Nearby usable even if the balance panel cannot refresh.
+    }
+  }
+
+  useEffect(() => {
     return () => {
       void serviceRef.current?.stopAll();
       serviceRef.current = null;
@@ -116,7 +193,10 @@ export default function NearbyPaymentsScreen() {
     }
 
     getService().primeCentralManager();
-  }, [canUseNearby]);
+    if (tokens?.accessToken) {
+      void refreshBalance(tokens.accessToken);
+    }
+  }, [canUseNearby, tokens?.accessToken]);
 
   useEffect(() => {
     if (status !== "signed_in") {
@@ -190,20 +270,13 @@ export default function NearbyPaymentsScreen() {
     if (!nextValue) {
       serviceRef.current?.stopDiscoverable();
       setIsDiscoverable(false);
+      setIncomingPayment(null);
+      setIncomingPaymentState("pending");
       setStatusMessage("Nearby discoverable mode stopped.");
       return;
     }
 
     if (!canUseNearby) {
-      return;
-    }
-
-    if (Platform.OS === "ios") {
-      setDiscoverableEnabled(false);
-      setIsDiscoverable(false);
-      setErrorMessage(
-        "Nearby discoverable mode is temporarily disabled on iOS while the peripheral bridge is being stabilized. Scan still works."
-      );
       return;
     }
 
@@ -253,7 +326,7 @@ export default function NearbyPaymentsScreen() {
 
           if (nextState === "started") {
             setStatusMessage(
-              "This device is now discoverable to nearby Android devices."
+              "This device is now discoverable to nearby devices."
             );
             setErrorMessage(null);
             setIsDiscoverable(true);
@@ -297,14 +370,14 @@ export default function NearbyPaymentsScreen() {
           }
 
           setIncomingPaymentState("verifying");
-          void fetchNearbyPaymentIntent(message.paymentIntentId, tokens.accessToken)
-            .then((paymentIntent) => {
-              if (paymentIntent.status === "completed") {
+          void fetchSendCheckout(message.paymentIntentId, tokens.accessToken)
+            .then(({ checkout }) => {
+              if (checkout.status === "completed") {
                 setIncomingPaymentState("completed");
                 setStatusMessage("Nearby payment verified successfully.");
               } else {
                 setErrorMessage(
-                  "Nearby completion was received, but the backend has not confirmed success yet."
+                  "Nearby completion was received, but Urnway has not confirmed success yet."
                 );
               }
             })
@@ -356,6 +429,18 @@ export default function NearbyPaymentsScreen() {
       return;
     }
 
+    if (!treasuryReady && paymentSource !== "urnway_balance") {
+      setErrorMessage(
+        "Urnway treasury is not configured yet, so Nearby Split and External wallet funding are disabled."
+      );
+      return;
+    }
+
+    if (senderFlow && !["completed", "failed"].includes(senderFlow.status)) {
+      setErrorMessage("Finish the active nearby send before starting another one.");
+      return;
+    }
+
     setErrorMessage(null);
     setStatusMessage(null);
     setBusyPublicUserId(user.publicUserId);
@@ -363,18 +448,52 @@ export default function NearbyPaymentsScreen() {
     try {
       const amountMinor = parseMajorAmountToMinorUnits(amount);
       const normalizedCurrency = currency.trim().toUpperCase();
-      const paymentIntent = await createNearbyPaymentIntent(
+
+      const prepared = await prepareSendCheckout(
         {
           receiverPublicUserId: user.publicUserId,
           amountMinor,
           currency: normalizedCurrency,
+          source: paymentSource,
         },
         tokens.accessToken
       );
 
+      const { checkout } = prepared;
+
+      if (paymentSource === "urnway_balance" && !checkout.fundingPlan.canCompleteNow) {
+        throw new Error(
+          `Urnway balance is short by ${checkout.fundingPlan.shortfallAmount} ${checkout.currency}. Switch to Split or External wallet.`
+        );
+      }
+
+      let topupId: string | null = null;
+
+      if (checkout.fundingPlan.requiresTopUp) {
+        setStatusMessage(
+          `Top up ${checkout.fundingPlan.shortfallAmount} ${checkout.currency} from your external wallet…`
+        );
+
+        const topup = await runUrnwayTopupFlow({
+          amountMinor: checkout.fundingPlan.shortfallAmountMinor,
+          currency: checkout.currency,
+          accessToken: tokens.accessToken,
+          onStatus: (message) => setStatusMessage(message),
+        });
+
+        if (!isCompletedTopup(topup)) {
+          throw new Error("Top-up did not complete. Nearby send was not started.");
+        }
+
+        topupId = topup.topupId;
+        await refreshBalance(tokens.accessToken);
+      }
+
       setSenderFlow({
         user,
-        paymentIntentId: paymentIntent.paymentIntentId,
+        checkoutId: checkout.checkoutId,
+        paymentSource,
+        topupId,
         amountMinor,
         currency: normalizedCurrency,
         status: "connecting",
@@ -383,14 +502,14 @@ export default function NearbyPaymentsScreen() {
 
       await getService().connectAndSendPay({
         deviceId: user.deviceId,
-        paymentIntentId: paymentIntent.paymentIntentId,
+        paymentIntentId: checkout.checkoutId,
         senderUsername: profile.username,
         amountMinor,
         currency: normalizedCurrency,
         onDeviceStatus: (nextStatus) => {
           updateNearbyUserStatus(user.publicUserId, nextStatus);
           setSenderFlow((currentFlow) =>
-            currentFlow && currentFlow.paymentIntentId === paymentIntent.paymentIntentId
+            currentFlow && currentFlow.checkoutId === checkout.checkoutId
               ? {
                   ...currentFlow,
                   status:
@@ -399,9 +518,9 @@ export default function NearbyPaymentsScreen() {
               : currentFlow
           );
         },
-        onAck: (paymentIntentId) => {
+        onAck: (paymentIntentId: NearbyAckMessage["paymentIntentId"]) => {
           setSenderFlow((currentFlow) =>
-            currentFlow && currentFlow.paymentIntentId === paymentIntentId
+            currentFlow && currentFlow.checkoutId === paymentIntentId
               ? {
                   ...currentFlow,
                   status: "acked",
@@ -431,8 +550,14 @@ export default function NearbyPaymentsScreen() {
     setErrorMessage(null);
 
     try {
-      await completeNearbyPaymentIntent(senderFlow.paymentIntentId, tokens.accessToken);
-      await getService().sendDone(senderFlow.paymentIntentId);
+      await completeSendCheckout(
+        senderFlow.checkoutId,
+        {
+          topupId: senderFlow.topupId ?? undefined,
+        },
+        tokens.accessToken
+      );
+      await getService().sendDone(senderFlow.checkoutId);
       setSenderFlow((currentFlow) =>
         currentFlow
           ? {
@@ -441,6 +566,7 @@ export default function NearbyPaymentsScreen() {
             }
           : null
       );
+      await refreshBalance(tokens.accessToken);
       setStatusMessage("Nearby payment marked successful and sent to the receiver.");
     } catch (error) {
       setErrorMessage(
@@ -452,6 +578,8 @@ export default function NearbyPaymentsScreen() {
   }
 
   const isNearbyReady = canUseNearby && Boolean(profileUsername && publicUserId);
+  const hasActiveSenderFlow =
+    senderFlow !== null && !["completed", "failed"].includes(senderFlow.status);
 
   return (
     <BlurScrollScreen title="Nearby" contentStyle={styles.container}>
@@ -470,8 +598,8 @@ export default function NearbyPaymentsScreen() {
         <Text variant="eyebrow">Nearby pay</Text>
         <Text variant="h3">Send money to a nearby Urnway user.</Text>
         <Text variant="bodySmall" color="secondary">
-          Nearby discovery stays on-device over Bluetooth. The backend only creates
-          and verifies the payment intent.
+          Nearby discovery stays on-device over Bluetooth. Urnway only prepares
+          the send checkout and verifies the final result.
         </Text>
       </Card>
 
@@ -518,6 +646,23 @@ export default function NearbyPaymentsScreen() {
 
       <Card style={styles.card}>
         <Text variant="h4">Send amount</Text>
+        {balance ? (
+          <View style={styles.balanceSummary}>
+            <Text variant="bodySmall" color="secondary">
+              Urnway balance: {balance.account.availableAmount} {balance.account.currency}
+            </Text>
+            <Text variant="bodySmall" color="secondary">
+              External wallet: {balance.externalWallet.musdBalance}{" "}
+              {balance.externalWallet.musdTokenSymbol}
+            </Text>
+            {!treasuryReady ? (
+              <Text variant="caption" color="secondary">
+                Treasury not configured yet. Nearby Split and External wallet
+                funding are disabled.
+              </Text>
+            ) : null}
+          </View>
+        ) : null}
         <Input
           label="Amount"
           keyboardType="decimal-pad"
@@ -525,14 +670,54 @@ export default function NearbyPaymentsScreen() {
           placeholder="10.00"
           value={amount}
         />
-        <Input
-          autoCapitalize="characters"
-          label="Currency"
-          maxLength={8}
-          onChangeText={(value) => setCurrency(value.toUpperCase())}
-          placeholder="GBP"
-          value={currency}
-        />
+        <View style={styles.balanceSummary}>
+          <Text variant="bodySmall" color="secondary">
+            Currency: {currency}
+          </Text>
+          <Text variant="caption" color="secondary">
+            Nearby balance sends are MUSD-only for now.
+          </Text>
+        </View>
+        <View style={styles.sourceSelector}>
+          {[
+            { label: "Urnway", value: "urnway_balance" as const },
+            { label: "Split", value: "split" as const },
+            { label: "Wallet", value: "external_wallet" as const },
+          ].map((option) => {
+            const isSelected = paymentSource === option.value;
+
+            return (
+              <Pressable
+                key={option.value}
+                style={[
+                  styles.sourceButton,
+                  isSelected ? styles.sourceButtonSelected : null,
+                  !treasuryReady &&
+                    option.value !== "urnway_balance" &&
+                    styles.sourceButtonDisabled,
+                ]}
+                onPress={() => {
+                  if (!treasuryReady && option.value !== "urnway_balance") {
+                    setErrorMessage(
+                      "Urnway treasury is not configured yet, so only Urnway balance Nearby sends are available."
+                    );
+                    return;
+                  }
+
+                  setPaymentSource(option.value);
+                }}
+              >
+                <Text
+                  variant="caption"
+                  weight={isSelected ? "semiBold" : "regular"}
+                  color={isSelected ? "brand" : "secondary"}
+                >
+                  {option.label}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
       </Card>
 
       <Card style={styles.card}>
@@ -563,6 +748,7 @@ export default function NearbyPaymentsScreen() {
               <Button
                 size="sm"
                 loading={busyPublicUserId === user.publicUserId}
+                disabled={hasActiveSenderFlow || isCompletingSenderFlow}
                 onPress={() => void handleSendToNearbyUser(user)}
               >
                 Send
@@ -579,11 +765,14 @@ export default function NearbyPaymentsScreen() {
             @{senderFlow.user.username}
           </Text>
           <Text variant="bodySmall" color="secondary">
-            Intent {senderFlow.paymentIntentId}
+            Checkout {senderFlow.checkoutId}
           </Text>
           <Text variant="bodySmall" color="secondary">
             {formatMinorCurrencyAmount(senderFlow.amountMinor, senderFlow.currency)} •{" "}
             {senderFlow.status}
+          </Text>
+          <Text variant="bodySmall" color="secondary">
+            Source: {senderFlow.paymentSource.replace(/_/g, " ")}
           </Text>
 
           {senderFlow.status === "acked" ? (
@@ -656,6 +845,33 @@ const styles = StyleSheet.create({
   },
   actionRow: {
     flexDirection: "row",
+  },
+  balanceSummary: {
+    gap: spacing[1],
+    padding: spacing[3],
+    borderRadius: 16,
+    backgroundColor: colors.background.secondary,
+  },
+  sourceSelector: {
+    flexDirection: "row",
+    gap: spacing[2],
+  },
+  sourceButton: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: spacing[2],
+    borderRadius: borderRadius.full,
+    borderWidth: 1,
+    borderColor: colors.border.default,
+    backgroundColor: colors.background.primary,
+  },
+  sourceButtonSelected: {
+    borderColor: colors.brand.default,
+    backgroundColor: colors.brand.light,
+  },
+  sourceButtonDisabled: {
+    opacity: 0.45,
   },
   userRow: {
     flexDirection: "row",

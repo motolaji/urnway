@@ -1,8 +1,8 @@
 diff --git a/node_modules/munim-bluetooth-peripheral/android/src/main/java/com/bluetoothperipheral/BluetoothPeripheralModule.kt b/node_modules/munim-bluetooth-peripheral/android/src/main/java/com/bluetoothperipheral/BluetoothPeripheralModule.kt
-index 92ad36a..258947a 100644
+index 92ad36a..b814566 100644
 --- a/node_modules/munim-bluetooth-peripheral/android/src/main/java/com/bluetoothperipheral/BluetoothPeripheralModule.kt
 +++ b/node_modules/munim-bluetooth-peripheral/android/src/main/java/com/bluetoothperipheral/BluetoothPeripheralModule.kt
-@@ -1,166 +1,354 @@
+@@ -1,166 +1,352 @@
  package com.bluetoothperipheral
  
 -import com.facebook.react.bridge.ReactApplicationContext
@@ -366,8 +366,7 @@ index 92ad36a..258947a 100644
        return
      }
 -    
-+
-     advertiser?.stopAdvertising(object : AdvertiseCallback() {})
+-    advertiser?.stopAdvertising(object : AdvertiseCallback() {})
 -    
 +
      advertiseJob?.cancel()
@@ -430,7 +429,7 @@ index 92ad36a..258947a 100644
      }
    }
  
-@@ -169,106 +357,77 @@ class BluetoothPeripheralModule(reactContext: ReactApplicationContext) :
+@@ -169,106 +355,77 @@ class BluetoothPeripheralModule(reactContext: ReactApplicationContext) :
      promise.resolve(currentAdvertisingData)
    }
  
@@ -523,7 +522,8 @@ index 92ad36a..258947a 100644
        val manufacturerData = hexStringToByteArray(dataMap.getString("manufacturerData"))
        if (manufacturerData != null) {
 -        // Default manufacturer code - in real usage, this should be a registered company identifier
-         dataBuilder.addManufacturerData(0xFFFF, manufacturerData)
+-        dataBuilder.addManufacturerData(0x0000, manufacturerData)
++        dataBuilder.addManufacturerData(0xFFFF, manufacturerData)
        }
      }
    }
@@ -579,7 +579,7 @@ index 92ad36a..258947a 100644
          }
        }
      }
-@@ -276,60 +435,91 @@ class BluetoothPeripheralModule(reactContext: ReactApplicationContext) :
+@@ -276,60 +433,91 @@ class BluetoothPeripheralModule(reactContext: ReactApplicationContext) :
  
    private fun hexStringToByteArray(hexString: String?): ByteArray? {
      if (hexString == null) return null
@@ -605,9 +605,10 @@ index 92ad36a..258947a 100644
 +
    @ReactMethod
    fun stopAdvertising() {
++    advertiseJob?.cancel()
      advertiser?.stopAdvertising(object : AdvertiseCallback() {})
      advertiser = null
-     advertiseJob?.cancel()
+-    advertiseJob?.cancel()
 +    emitEvent(
 +      EVENT_ADVERTISING_STATE_CHANGED,
 +      Arguments.createMap().apply {
@@ -694,7 +695,7 @@ index 92ad36a..258947a 100644
            service.addCharacteristic(characteristic)
          }
        }
-@@ -338,15 +528,48 @@ class BluetoothPeripheralModule(reactContext: ReactApplicationContext) :
+@@ -338,15 +526,48 @@ class BluetoothPeripheralModule(reactContext: ReactApplicationContext) :
      gattServerReady = true
    }
  
@@ -762,16 +763,17 @@ index 51186a6..e866dc8 100644
  
  @end
 diff --git a/node_modules/munim-bluetooth-peripheral/ios/BluetoothPeripheral.mm b/node_modules/munim-bluetooth-peripheral/ios/BluetoothPeripheral.mm
-index 12a0217..230f4e7 100644
+index 12a0217..639b2cb 100644
 --- a/node_modules/munim-bluetooth-peripheral/ios/BluetoothPeripheral.mm
 +++ b/node_modules/munim-bluetooth-peripheral/ios/BluetoothPeripheral.mm
-@@ -1,263 +1,518 @@
+@@ -1,263 +1,554 @@
  #import "BluetoothPeripheral.h"
  #import <CoreBluetooth/CoreBluetooth.h>
  
 +static NSString *const kCharacteristicWriteReceivedEvent = @"characteristicWriteReceived";
 +static NSString *const kCentralConnectionStateChangedEvent = @"centralConnectionStateChanged";
 +static NSString *const kCharacteristicSubscriptionChangedEvent = @"characteristicSubscriptionChanged";
++static NSString *const kAdvertisingStateChangedEvent = @"advertisingStateChanged";
 +
  @interface BluetoothPeripheral () <CBPeripheralManagerDelegate>
  @property (nonatomic, strong) CBPeripheralManager *peripheralManager;
@@ -831,7 +833,8 @@ index 12a0217..230f4e7 100644
 +  return @[
 +    kCharacteristicWriteReceivedEvent,
 +    kCentralConnectionStateChangedEvent,
-+    kCharacteristicSubscriptionChangedEvent
++    kCharacteristicSubscriptionChangedEvent,
++    kAdvertisingStateChangedEvent
 +  ];
 +}
 +
@@ -925,6 +928,15 @@ index 12a0217..230f4e7 100644
 +
 +  [self.peripheralManager stopAdvertising];
 +  [self.peripheralManager startAdvertising:self.currentAdvertisingData];
++}
++
++- (void)emitAdvertisingState:(NSString *)state errorCode:(NSNumber *)errorCode {
++  NSMutableDictionary *payload = [NSMutableDictionary dictionaryWithObject:state forKey:@"state"];
++  if (errorCode != nil) {
++    payload[@"errorCode"] = errorCode;
++  }
++
++  [self emitEvent:kAdvertisingStateChangedEvent payload:payload];
 +}
 +
 +RCT_EXPORT_METHOD(startAdvertising:(NSDictionary *)options) {
@@ -1023,15 +1035,15 @@ index 12a0217..230f4e7 100644
 -    // 0x08-0x09 - Local Name (fully supported)
 -    if (dataDict[@"shortenedLocalName"]) {
 -        advertisingData[CBAdvertisementDataLocalNameKey] = dataDict[@"shortenedLocalName"];
+-    }
+-    if (dataDict[@"completeLocalName"]) {
+-        advertisingData[CBAdvertisementDataLocalNameKey] = dataDict[@"completeLocalName"];
 +  if (dataDict[@"flags"]) {
 +    NSNumber *flags = dataDict[@"flags"];
 +    if ([flags isKindOfClass:[NSNumber class]]) {
 +      BOOL isConnectable = (flags.intValue & 0x02) != 0;
 +      advertisingData[CBAdvertisementDataIsConnectable] = @(isConnectable);
      }
--    if (dataDict[@"completeLocalName"]) {
--        advertisingData[CBAdvertisementDataLocalNameKey] = dataDict[@"completeLocalName"];
--    }
 -    
 -    // 0x0A - Tx Power Level (fully supported)
 -    if (dataDict[@"txPowerLevel"]) {
@@ -1145,10 +1157,10 @@ index 12a0217..230f4e7 100644
 +      if ([uuidStr isKindOfClass:[NSString class]]) {
 +        [uuidArray addObject:[CBUUID UUIDWithString:uuidStr]];
 +      }
-+    }
+     }
 +    if (uuidArray.count > 0) {
 +      advertisingData[key] = uuidArray;
-     }
++    }
 +  }
  }
  
@@ -1243,6 +1255,7 @@ index 12a0217..230f4e7 100644
 -    [self.peripheralManager stopAdvertising];
 +  self.advertisingRequested = NO;
 +  [self.peripheralManager stopAdvertising];
++  [self emitAdvertisingState:@"stopped" errorCode:nil];
  }
  
  RCT_EXPORT_METHOD(setServices:(NSArray *)services) {
@@ -1328,8 +1341,14 @@ index 12a0217..230f4e7 100644
 +        }
 +      }
 +
-+      CBAttributePermissions permissions =
-+        CBAttributePermissionsReadable | CBAttributePermissionsWriteable;
++      CBAttributePermissions permissions = 0;
++      if (properties & CBCharacteristicPropertyRead) {
++        permissions |= CBAttributePermissionsReadable;
++      }
++      if (properties & CBCharacteristicPropertyWrite ||
++          properties & CBCharacteristicPropertyWriteWithoutResponse) {
++        permissions |= CBAttributePermissionsWriteable;
++      }
 +
 +      if ([charUUID isKindOfClass:[NSString class]]) {
 +        CBMutableCharacteristic *characteristic =
@@ -1388,7 +1407,25 @@ index 12a0217..230f4e7 100644
 +  if (peripheral.state == CBManagerStatePoweredOn) {
 +    [self applyConfiguredServicesIfPossible];
 +    [self resumeAdvertisingIfPossible];
++    return;
 +  }
++
++  if (peripheral.state == CBManagerStatePoweredOff || peripheral.state == CBManagerStateUnsupported ||
++      peripheral.state == CBManagerStateUnauthorized) {
++    self.advertisingRequested = NO;
++    [self emitAdvertisingState:@"failed" errorCode:@(peripheral.state)];
++  }
++}
++
++- (void)peripheralManagerDidStartAdvertising:(CBPeripheralManager *)peripheral
++                                       error:(NSError *)error {
++  if (error != nil) {
++    self.advertisingRequested = NO;
++    [self emitAdvertisingState:@"failed" errorCode:@(error.code)];
++    return;
++  }
++
++  [self emitAdvertisingState:@"started" errorCode:nil];
 +}
 +
 +- (void)peripheralManager:(CBPeripheralManager *)peripheral
