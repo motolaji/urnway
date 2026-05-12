@@ -1,7 +1,8 @@
 'use client';
 
 import { QueryClient } from '@tanstack/react-query';
-import { getConfig, mezoTestnet as passportMezoTestnet } from '@mezo-org/passport';
+import { getConfig } from '@mezo-org/passport/dist/src/config.js';
+import { mezoTestnet as passportMezoTestnet } from '@mezo-org/passport/dist/src/constants.js';
 import type { Config } from 'wagmi';
 
 import { prepareWalletBridgeSession } from '@/lib/wallet-session';
