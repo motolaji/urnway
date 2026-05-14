@@ -23,7 +23,6 @@ type FlowStage =
   | 'idle'
   | 'switching_chain'
   | 'awaiting_wallet'
-  | 'submitting'
   | 'submitted'
   | 'error';
 
@@ -114,6 +113,10 @@ function isMobileWalletConnector(connectorName: string | undefined) {
     name.includes('metamask') ||
     name.includes('coinbase')
   );
+}
+
+function getTransactionTimeoutMs(connectorName: string | undefined) {
+  return isMobileWalletConnector(connectorName) ? 120000 : 180000;
 }
 
 function normalizeTransactionHash(result: unknown) {
@@ -286,8 +289,7 @@ export default function TxScreen() {
     senderMatches &&
     chainId === config.request.chainId &&
     stage !== 'switching_chain' &&
-    stage !== 'awaiting_wallet' &&
-    stage !== 'submitting';
+    stage !== 'awaiting_wallet';
 
   useEffect(() => {
     if (!config.ok || !isConnected || !address || !switchChainAsync) {
@@ -401,18 +403,20 @@ export default function TxScreen() {
         request: config.request,
       });
 
-      const hash = isMobileWalletConnector(connector?.name)
-        ? await txPromise
-        : await Promise.race([
-            txPromise,
-            new Promise<never>((_, reject) => {
-              setTimeout(() => {
-                reject(
-                  new Error('Transaction timed out. Please check your wallet and try again.')
-                );
-              }, 180000);
-            }),
-          ]);
+      const hash = await Promise.race([
+        txPromise,
+        new Promise<never>((_, reject) => {
+          setTimeout(() => {
+            reject(
+              new Error(
+                isMobileWalletConnector(connector?.name)
+                  ? 'Wallet approval timed out. Open the wallet app, confirm the transfer if it is pending, then try again.'
+                  : 'Transaction timed out. Please check your wallet and try again.'
+              )
+            );
+          }, getTransactionTimeoutMs(connector?.name));
+        }),
+      ]);
 
       // Build the result payload
       const resultPayload = {
@@ -531,8 +535,6 @@ export default function TxScreen() {
               ? 'Switching to Mezo...'
               : stage === 'awaiting_wallet'
                 ? 'Open your wallet...'
-                : stage === 'submitting'
-                  ? 'Confirming in wallet...'
                   : 'Approve transfer'}
           </button>
         </div>

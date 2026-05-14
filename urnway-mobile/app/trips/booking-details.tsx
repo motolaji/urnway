@@ -369,27 +369,35 @@ export default function BookingDetailsScreen() {
               accessToken
             );
 
-      setBalance((currentBalance) =>
-        prepared.balance
-          ? {
-              ...(currentBalance ?? {
-                externalWallet: {
-                  walletAddress: "",
-                  nativeTokenBalance: "0",
-                  nativeTokenSymbol: "BTC",
-                  musdBalance: "0",
-                  musdTokenSymbol: "MUSD",
-                  source: "mezo" as const,
-                  updatedAt: new Date().toISOString(),
-                },
-                treasuryWalletAddress: null,
-                tokenAddress: "",
-                updatedAt: new Date().toISOString(),
-              }),
-              account: prepared.balance,
-            }
-          : currentBalance
-      );
+      setBalance((currentBalance) => {
+        if (!prepared.balance) {
+          return currentBalance;
+        }
+
+        if (currentBalance) {
+          return {
+            ...currentBalance,
+            account: prepared.balance,
+          };
+        }
+
+        return {
+          account: prepared.balance,
+          externalWallet: {
+            walletAddress: "",
+            nativeTokenBalance: "0",
+            nativeTokenSymbol: "BTC",
+            musdBalance: "0",
+            musdTokenSymbol: "MUSD",
+            source: "mezo" as const,
+            updatedAt: new Date().toISOString(),
+          },
+          treasuryWalletAddress: null,
+          tokenAddress: "",
+          withdrawalsEnabled: false,
+          updatedAt: new Date().toISOString(),
+        };
+      });
 
       const { checkout } = prepared;
 

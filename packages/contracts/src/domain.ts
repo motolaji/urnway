@@ -112,10 +112,58 @@ export type BalanceTopup = {
   tokenAddress: string;
   senderWalletAddress: string | null;
   txHash: string | null;
+  chainId: number | null;
+  explorerUrl: string | null;
   completedAt: string | null;
   expiresAt: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type BalanceWithdrawal = {
+  withdrawalId: string;
+  status: "prepared" | "submitted" | "completed" | "failed" | "expired";
+  amountMinor: number;
+  amount: string;
+  currency: string;
+  treasuryWalletAddress: string;
+  destinationWalletAddress: string;
+  tokenAddress: string;
+  txHash: string | null;
+  chainId: number | null;
+  explorerUrl: string | null;
+  failureReason: string | null;
+  submittedAt: string | null;
+  completedAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type BalanceActivityItem = {
+  id: string;
+  entryType: string;
+  direction: string;
+  amountMinor: number;
+  amount: string;
+  currency: string;
+  status: string;
+  note: string | null;
+  createdAt: string;
+  txHash: string | null;
+  chainId: number | null;
+  explorerUrl: string | null;
+  counterpartyWalletAddress: string | null;
+  counterparty:
+    | {
+        label: string;
+        username: string | null;
+        walletAddress: string | null;
+        publicUserId: string | null;
+      }
+    | null;
+  referenceType: string | null;
+  referenceId: string | null;
 };
 
 export type FundingPlan = {
@@ -147,6 +195,7 @@ export type UrnwayBalanceSummary = {
   };
   treasuryWalletAddress: string | null;
   tokenAddress: string;
+  withdrawalsEnabled: boolean;
   updatedAt: string;
 };
 

@@ -229,6 +229,14 @@ export const routeGroups: ApiRouteGroup[] = [
         auth: 'bearer',
       },
       {
+        method: 'GET',
+        path: '/v1/balance/activity',
+        summary:
+          'Returns the signed-in user balance ledger activity, including top-ups, withdrawals, internal sends, and booking debits.',
+        status: 'available',
+        auth: 'bearer',
+      },
+      {
         method: 'POST',
         path: '/v1/balance/topups/prepare',
         summary:
@@ -249,6 +257,30 @@ export const routeGroups: ApiRouteGroup[] = [
         path: '/v1/balance/topups/:topupId',
         summary:
           'Returns the latest state for a prepared or submitted Urnway balance top-up intent.',
+        status: 'available',
+        auth: 'bearer',
+      },
+      {
+        method: 'POST',
+        path: '/v1/balance/withdrawals/prepare',
+        summary:
+          'Prepares a treasury-signed MUSD withdrawal from Urnway balance into the linked wallet.',
+        status: 'available',
+        auth: 'bearer',
+      },
+      {
+        method: 'POST',
+        path: '/v1/balance/withdrawals/:withdrawalId/submit',
+        summary:
+          'Submits a prepared withdrawal for immediate treasury execution and returns transaction metadata for verification.',
+        status: 'available',
+        auth: 'bearer',
+      },
+      {
+        method: 'GET',
+        path: '/v1/balance/withdrawals/:withdrawalId',
+        summary:
+          'Returns the latest state for a prepared or submitted Urnway balance withdrawal.',
         status: 'available',
         auth: 'bearer',
       },

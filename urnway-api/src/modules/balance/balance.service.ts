@@ -8,25 +8,39 @@ import {
   isAddress,
   parseAbi,
   parseUnits,
+  type Address,
   type Hex,
 } from 'viem';
 
 import { env } from '../../config/env.js';
-import { mezoClient } from '../../lib/mezo.js';
+import {
+  buildMezoExplorerTxUrl,
+  getTreasurySigner,
+  mezoChain,
+  mezoClient,
+} from '../../lib/mezo.js';
 import { HttpError } from '../../utils/http-error.js';
-import { findUserByPublicUserId, findUserByUsername } from '../users/users.repository.js';
+import {
+  findUserById,
+  findUserByPublicUserId,
+  findUserByUsername,
+} from '../users/users.repository.js';
 import {
   createBalanceAccount,
   createBalanceLedgerEntry,
   createBalanceTopupIntentRecord,
+  createBalanceWithdrawalIntentRecord,
   createBookingCheckoutRecord,
   createSendCheckoutRecord,
   findBalanceAccountByUserId,
+  findBalanceWithdrawalIntentByWithdrawalId,
   findBalanceTopupIntentByTopupId,
   findBalanceTopupIntentByTxHash,
   findBookingCheckoutByCheckoutId,
   findSendCheckoutByCheckoutId,
+  listBalanceLedgerEntriesByUserId,
   updateBalanceAccountById,
+  updateBalanceWithdrawalIntentById,
   updateBalanceTopupIntentById,
   updateBookingCheckoutById,
   updateSendCheckoutById,
@@ -63,17 +77,25 @@ type FundingPlan = {
 };
 
 const BALANCE_TOPUP_TTL_MS = 1000 * 60 * 15;
+const BALANCE_WITHDRAWAL_TTL_MS = 1000 * 60 * 15;
 const SEND_CHECKOUT_TTL_MS = 1000 * 60 * 15;
 const BOOKING_CHECKOUT_TTL_MS = 1000 * 60 * 20;
+const BALANCE_ACTIVITY_LIMIT = 50;
 const ERC20_TRANSFER_EVENT_ABI = parseAbi([
   'event Transfer(address indexed from, address indexed to, uint256 value)',
 ]);
 type BalanceTopupIntentRecord = NonNullable<
   Awaited<ReturnType<typeof findBalanceTopupIntentByTopupId>>
 >;
+type BalanceWithdrawalIntentRecord = NonNullable<
+  Awaited<ReturnType<typeof findBalanceWithdrawalIntentByWithdrawalId>>
+>;
 type SendCheckoutRecord = NonNullable<
   Awaited<ReturnType<typeof findSendCheckoutByCheckoutId>>
 >;
+type BalanceLedgerEntryRecord = Awaited<
+  ReturnType<typeof listBalanceLedgerEntriesByUserId>
+>[number];
 
 function buildTopupId() {
   return `topup_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
@@ -85,6 +107,10 @@ function buildSendCheckoutId() {
 
 function buildBookingCheckoutId() {
   return `book_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
+}
+
+function buildWithdrawalId() {
+  return `wd_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
 }
 
 function normalizeWalletAddress(walletAddress: string) {
@@ -136,6 +162,35 @@ function getTreasuryWalletAddress() {
   }
 
   return normalizeWalletAddress(env.URNWAY_TREASURY_WALLET_ADDRESS);
+}
+
+function getTreasurySignerOrThrow() {
+  const signer = getTreasurySigner();
+
+  if (!signer) {
+    throw new HttpError(
+      503,
+      'Urnway withdrawals are not configured yet. Set URNWAY_TREASURY_PRIVATE_KEY.'
+    );
+  }
+
+  return signer;
+}
+
+function getTxMetadata(txHash: string | null, chainId: number | null) {
+  if (!txHash || !chainId) {
+    return {
+      txHash: null,
+      chainId: null,
+      explorerUrl: null,
+    };
+  }
+
+  return {
+    txHash,
+    chainId,
+    explorerUrl: buildMezoExplorerTxUrl(txHash),
+  };
 }
 
 function serializeBalanceAccount(account: {
@@ -463,7 +518,12 @@ async function creditTopupIfVerified(input: {
     entryType: 'topup_credit',
     direction: 'credit',
     amountMinor: topupIntent.amountMinor,
+    status: 'completed',
     currency: topupIntent.currency,
+    txHash: input.txHash,
+    chainId: env.MEZO_CHAIN_ID,
+    explorerUrl: buildMezoExplorerTxUrl(input.txHash),
+    counterpartyWalletAddress: senderWalletAddress,
     referenceType: 'topup',
     referenceId: topupIntent.topupId,
     note: `Wallet top-up ${topupIntent.topupId}`,
@@ -473,6 +533,8 @@ async function creditTopupIfVerified(input: {
     status: 'completed',
     senderWalletAddress,
     txHash: input.txHash,
+    chainId: env.MEZO_CHAIN_ID,
+    explorerUrl: buildMezoExplorerTxUrl(input.txHash),
     completedAt: new Date(),
   });
 
@@ -519,11 +581,31 @@ function serializeTopupIntent(topupIntent: BalanceTopupIntentRecord) {
     treasuryWalletAddress: topupIntent.treasuryWalletAddress,
     tokenAddress: topupIntent.tokenAddress,
     senderWalletAddress: topupIntent.senderWalletAddress,
-    txHash: topupIntent.txHash,
+    ...getTxMetadata(topupIntent.txHash, topupIntent.chainId),
     completedAt: topupIntent.completedAt?.toISOString() ?? null,
     expiresAt: topupIntent.expiresAt?.toISOString() ?? null,
     createdAt: topupIntent.createdAt.toISOString(),
     updatedAt: topupIntent.updatedAt.toISOString(),
+  };
+}
+
+function serializeWithdrawalIntent(withdrawalIntent: BalanceWithdrawalIntentRecord) {
+  return {
+    withdrawalId: withdrawalIntent.withdrawalId,
+    status: withdrawalIntent.status,
+    amountMinor: withdrawalIntent.amountMinor,
+    amount: formatMinorAmount(withdrawalIntent.amountMinor),
+    currency: withdrawalIntent.currency,
+    treasuryWalletAddress: withdrawalIntent.treasuryWalletAddress,
+    destinationWalletAddress: withdrawalIntent.destinationWalletAddress,
+    tokenAddress: withdrawalIntent.tokenAddress,
+    ...getTxMetadata(withdrawalIntent.txHash, withdrawalIntent.chainId),
+    failureReason: withdrawalIntent.failureReason,
+    submittedAt: withdrawalIntent.submittedAt?.toISOString() ?? null,
+    completedAt: withdrawalIntent.completedAt?.toISOString() ?? null,
+    expiresAt: withdrawalIntent.expiresAt?.toISOString() ?? null,
+    createdAt: withdrawalIntent.createdAt.toISOString(),
+    updatedAt: withdrawalIntent.updatedAt.toISOString(),
   };
 }
 
@@ -538,6 +620,9 @@ export async function getBalance(user: AuthenticatedUser) {
     ensureBalanceAccountForUser(user.id),
     buildExternalWalletSummary(user.walletAddress),
   ]);
+  const withdrawalsEnabled = Boolean(
+    env.URNWAY_TREASURY_WALLET_ADDRESS && env.URNWAY_TREASURY_PRIVATE_KEY
+  );
 
   return {
     balance: {
@@ -545,6 +630,7 @@ export async function getBalance(user: AuthenticatedUser) {
       externalWallet,
       treasuryWalletAddress: env.URNWAY_TREASURY_WALLET_ADDRESS ?? null,
       tokenAddress: getMusdTokenAddress(),
+      withdrawalsEnabled,
       updatedAt: new Date().toISOString(),
     },
   };
@@ -640,6 +726,404 @@ export async function getBalanceTopup(user: AuthenticatedUser, topupId: string) 
 
   return {
     topup: serializeTopupIntent(synchronizedIntent),
+  };
+}
+
+function buildCounterpartyFromUser(user: {
+  walletAddress: string;
+  publicUserId: string | null;
+  username: string | null;
+  mezoId: string | null;
+}) {
+  return {
+    label: user.username ?? user.mezoId ?? user.walletAddress,
+    username: user.username ?? null,
+    walletAddress: user.walletAddress,
+    publicUserId: user.publicUserId ?? null,
+  };
+}
+
+async function serializeBalanceActivityEntry(
+  entry: BalanceLedgerEntryRecord
+) {
+  let counterparty:
+    | {
+        label: string;
+        username: string | null;
+        walletAddress: string | null;
+        publicUserId: string | null;
+      }
+    | null = null;
+  let txHash = entry.txHash;
+  let chainId = entry.chainId;
+  let explorerUrl = entry.explorerUrl;
+  let status = entry.status;
+
+  if (entry.referenceType === 'topup' && entry.referenceId) {
+    const topupIntent = await findBalanceTopupIntentByTopupId(entry.referenceId);
+
+    if (topupIntent) {
+      txHash = topupIntent.txHash;
+      chainId = topupIntent.chainId;
+      explorerUrl = topupIntent.explorerUrl;
+      status = topupIntent.status;
+      counterparty = {
+        label: 'External wallet',
+        username: null,
+        walletAddress: topupIntent.senderWalletAddress,
+        publicUserId: null,
+      };
+    }
+  } else if (entry.referenceType === 'withdrawal' && entry.referenceId) {
+    const withdrawalIntent = await findBalanceWithdrawalIntentByWithdrawalId(entry.referenceId);
+
+    if (withdrawalIntent) {
+      txHash = withdrawalIntent.txHash;
+      chainId = withdrawalIntent.chainId;
+      explorerUrl = withdrawalIntent.explorerUrl;
+      status = withdrawalIntent.status;
+      counterparty = {
+        label: 'Linked wallet',
+        username: null,
+        walletAddress: withdrawalIntent.destinationWalletAddress,
+        publicUserId: null,
+      };
+    }
+  } else if (entry.referenceType === 'send_checkout' && entry.referenceId) {
+    const checkout = await findSendCheckoutByCheckoutId(entry.referenceId);
+
+    if (checkout) {
+      const otherUserId =
+        checkout.userId === entry.userId ? checkout.receiverUserId : checkout.userId;
+      const otherUser = await findUserById(otherUserId);
+
+      if (otherUser) {
+        counterparty = buildCounterpartyFromUser(otherUser);
+      }
+
+      status = checkout.status;
+    }
+  } else if (entry.referenceType === 'booking_checkout' && entry.referenceId) {
+    const checkout = await findBookingCheckoutByCheckoutId(entry.referenceId);
+
+    if (checkout) {
+      status = checkout.status;
+    }
+  }
+
+  return {
+    id: entry.id,
+    entryType: entry.entryType,
+    direction: entry.direction,
+    amountMinor: entry.amountMinor,
+    amount: formatMinorAmount(entry.amountMinor),
+    currency: entry.currency,
+    status,
+    note: entry.note,
+    createdAt: entry.createdAt.toISOString(),
+    txHash: txHash ?? null,
+    chainId: chainId ?? null,
+    explorerUrl: explorerUrl ?? null,
+    counterpartyWalletAddress: entry.counterpartyWalletAddress ?? counterparty?.walletAddress ?? null,
+    counterparty,
+    referenceType: entry.referenceType ?? null,
+    referenceId: entry.referenceId ?? null,
+  };
+}
+
+export async function getBalanceActivity(user: AuthenticatedUser) {
+  const entries = await listBalanceLedgerEntriesByUserId(user.id, BALANCE_ACTIVITY_LIMIT);
+
+  return {
+    activity: await Promise.all(entries.map((entry) => serializeBalanceActivityEntry(entry))),
+  };
+}
+
+export async function prepareBalanceWithdrawal(
+  user: AuthenticatedUser,
+  input: {
+    amountMinor: number;
+    currency: string;
+  }
+) {
+  assertMusdCurrency(input.currency);
+
+  if (!Number.isInteger(input.amountMinor) || input.amountMinor <= 0) {
+    throw new HttpError(400, 'amountMinor must be a positive integer');
+  }
+
+  const treasuryWalletAddress = getTreasuryWalletAddress();
+  const signer = getTreasurySignerOrThrow();
+
+  if (normalizeWalletAddress(signer.account.address) !== treasuryWalletAddress) {
+    throw new HttpError(
+      503,
+      'Treasury signer does not match URNWAY_TREASURY_WALLET_ADDRESS.'
+    );
+  }
+
+  const destinationWalletAddress = normalizeWalletAddress(user.walletAddress);
+  const account = await ensureBalanceAccountForUser(user.id);
+
+  if (account.availableAmountMinor < input.amountMinor) {
+    throw new HttpError(409, 'Urnway balance is not sufficient for this withdrawal', {
+      availableAmountMinor: account.availableAmountMinor,
+      requiredAmountMinor: input.amountMinor,
+    });
+  }
+
+  const withdrawalIntent = await createBalanceWithdrawalIntentRecord({
+    withdrawalId: buildWithdrawalId(),
+    userId: user.id,
+    amountMinor: input.amountMinor,
+    currency: input.currency.trim().toUpperCase(),
+    treasuryWalletAddress,
+    destinationWalletAddress,
+    tokenAddress: getMusdTokenAddress(),
+    chainId: env.MEZO_CHAIN_ID,
+    expiresAt: new Date(Date.now() + BALANCE_WITHDRAWAL_TTL_MS),
+  });
+
+  return {
+    withdrawal: serializeWithdrawalIntent(withdrawalIntent),
+    balance: serializeBalanceAccount(account),
+  };
+}
+
+async function completeWithdrawalIfSettled(withdrawalIntent: BalanceWithdrawalIntentRecord) {
+  if (withdrawalIntent.status === 'completed' || withdrawalIntent.status === 'failed') {
+    return withdrawalIntent;
+  }
+
+  if (!withdrawalIntent.txHash) {
+    return withdrawalIntent;
+  }
+
+  const receipt = await mezoClient
+    .getTransactionReceipt({
+      hash: normalizeTxHash(withdrawalIntent.txHash),
+    })
+    .catch(() => null);
+
+  if (!receipt) {
+    return withdrawalIntent;
+  }
+
+  if (receipt.status !== 'success') {
+    const failedIntent = await updateBalanceWithdrawalIntentById(withdrawalIntent.id, {
+      status: 'failed',
+      failureReason: 'Treasury withdrawal transaction failed onchain.',
+    });
+
+    return failedIntent ?? withdrawalIntent;
+  }
+
+  const tokenAddress = getAddress(withdrawalIntent.tokenAddress);
+  const treasuryWalletAddress = normalizeWalletAddress(withdrawalIntent.treasuryWalletAddress);
+  const destinationWalletAddress = normalizeWalletAddress(
+    withdrawalIntent.destinationWalletAddress
+  );
+  const amountBaseUnits = parseUnits(
+    formatMinorAmount(withdrawalIntent.amountMinor),
+    18
+  );
+
+  const matchingTransfer = receipt.logs.find((log) => {
+    if (getAddress(log.address) !== tokenAddress) {
+      return false;
+    }
+
+    try {
+      const decoded = decodeEventLog({
+        abi: ERC20_TRANSFER_EVENT_ABI,
+        data: log.data,
+        topics: log.topics,
+      });
+
+      if (decoded.eventName !== 'Transfer') {
+        return false;
+      }
+
+      return (
+        normalizeWalletAddress(String(decoded.args.from)) === treasuryWalletAddress &&
+        normalizeWalletAddress(String(decoded.args.to)) === destinationWalletAddress &&
+        decoded.args.value === amountBaseUnits
+      );
+    } catch {
+      return false;
+    }
+  });
+
+  if (!matchingTransfer) {
+    const failedIntent = await updateBalanceWithdrawalIntentById(withdrawalIntent.id, {
+      status: 'failed',
+      failureReason: 'Treasury transfer receipt did not match the expected withdrawal.',
+    });
+
+    return failedIntent ?? withdrawalIntent;
+  }
+
+  const account = await ensureBalanceAccountForUser(withdrawalIntent.userId);
+
+  if (account.availableAmountMinor < withdrawalIntent.amountMinor) {
+    const failedIntent = await updateBalanceWithdrawalIntentById(withdrawalIntent.id, {
+      status: 'failed',
+      failureReason: 'Urnway balance changed before withdrawal could be finalized.',
+    });
+
+    return failedIntent ?? withdrawalIntent;
+  }
+
+  await updateBalanceAccountById(account.id, {
+    availableAmountMinor: account.availableAmountMinor - withdrawalIntent.amountMinor,
+  });
+  await createBalanceLedgerEntry({
+    accountId: account.id,
+    userId: withdrawalIntent.userId,
+    entryType: 'withdrawal_debit',
+    direction: 'debit',
+    amountMinor: withdrawalIntent.amountMinor,
+    currency: withdrawalIntent.currency,
+    status: 'completed',
+    txHash: withdrawalIntent.txHash,
+    chainId: withdrawalIntent.chainId,
+    explorerUrl: withdrawalIntent.explorerUrl,
+    counterpartyWalletAddress: withdrawalIntent.destinationWalletAddress,
+    referenceType: 'withdrawal',
+    referenceId: withdrawalIntent.withdrawalId,
+    note: `Withdrawal ${withdrawalIntent.withdrawalId}`,
+  });
+
+  const completedIntent = await updateBalanceWithdrawalIntentById(withdrawalIntent.id, {
+    status: 'completed',
+    completedAt: new Date(),
+  });
+
+  return completedIntent ?? withdrawalIntent;
+}
+
+async function synchronizeWithdrawalLifecycleByWithdrawalId(withdrawalId: string) {
+  const withdrawalIntent = await findBalanceWithdrawalIntentByWithdrawalId(withdrawalId);
+
+  if (!withdrawalIntent) {
+    throw new HttpError(404, 'Withdrawal intent not found');
+  }
+
+  if (withdrawalIntent.status === 'completed' || withdrawalIntent.status === 'failed') {
+    return withdrawalIntent;
+  }
+
+  if (withdrawalIntent.expiresAt && withdrawalIntent.expiresAt.getTime() <= Date.now()) {
+    const expiredIntent = await updateBalanceWithdrawalIntentById(withdrawalIntent.id, {
+      status: 'expired',
+    });
+
+    return expiredIntent ?? withdrawalIntent;
+  }
+
+  if (withdrawalIntent.txHash) {
+    return completeWithdrawalIfSettled(withdrawalIntent);
+  }
+
+  return withdrawalIntent;
+}
+
+export async function submitBalanceWithdrawal(
+  user: AuthenticatedUser,
+  withdrawalId: string
+) {
+  const withdrawalIntent = await findBalanceWithdrawalIntentByWithdrawalId(withdrawalId);
+
+  if (!withdrawalIntent || withdrawalIntent.userId !== user.id) {
+    throw new HttpError(404, 'Withdrawal intent not found');
+  }
+
+  if (withdrawalIntent.status === 'completed') {
+    return {
+      withdrawal: serializeWithdrawalIntent(withdrawalIntent),
+    };
+  }
+
+  if (withdrawalIntent.txHash) {
+    const synchronizedIntent = await completeWithdrawalIfSettled(withdrawalIntent);
+    return {
+      withdrawal: serializeWithdrawalIntent(synchronizedIntent),
+    };
+  }
+
+  assertActiveCheckout(withdrawalIntent);
+
+  const signer = getTreasurySignerOrThrow();
+  const treasuryWalletAddress = getTreasuryWalletAddress();
+
+  if (normalizeWalletAddress(signer.account.address) !== treasuryWalletAddress) {
+    throw new HttpError(
+      503,
+      'Treasury signer does not match URNWAY_TREASURY_WALLET_ADDRESS.'
+    );
+  }
+
+  const account = await ensureBalanceAccountForUser(user.id);
+
+  if (account.availableAmountMinor < withdrawalIntent.amountMinor) {
+    throw new HttpError(409, 'Urnway balance is not sufficient for this withdrawal', {
+      availableAmountMinor: account.availableAmountMinor,
+      requiredAmountMinor: withdrawalIntent.amountMinor,
+    });
+  }
+
+  try {
+    const txHash = await signer.walletClient.writeContract({
+      account: signer.account,
+      chain: mezoChain,
+      address: getAddress(withdrawalIntent.tokenAddress),
+      abi: MUSD_TOKEN_ABI,
+      functionName: 'transfer',
+      args: [
+        getAddress(withdrawalIntent.destinationWalletAddress) as Address,
+        parseUnits(formatMinorAmount(withdrawalIntent.amountMinor), 18),
+      ],
+    });
+
+    const submittedIntent = await updateBalanceWithdrawalIntentById(withdrawalIntent.id, {
+      status: 'submitted',
+      txHash,
+      chainId: env.MEZO_CHAIN_ID,
+      explorerUrl: buildMezoExplorerTxUrl(txHash),
+      submittedAt: new Date(),
+      failureReason: null,
+    });
+
+    if (!submittedIntent) {
+      throw new HttpError(500, 'Could not update withdrawal intent after submission.');
+    }
+
+    const synchronizedIntent = await completeWithdrawalIfSettled(submittedIntent);
+
+    return {
+      withdrawal: serializeWithdrawalIntent(synchronizedIntent),
+    };
+  } catch (error) {
+    const failedIntent = await updateBalanceWithdrawalIntentById(withdrawalIntent.id, {
+      status: 'failed',
+      failureReason: error instanceof Error ? error.message : 'Treasury transfer failed.',
+    });
+
+    return {
+      withdrawal: serializeWithdrawalIntent(failedIntent ?? withdrawalIntent),
+    };
+  }
+}
+
+export async function getBalanceWithdrawal(user: AuthenticatedUser, withdrawalId: string) {
+  const synchronizedIntent = await synchronizeWithdrawalLifecycleByWithdrawalId(withdrawalId);
+
+  if (synchronizedIntent.userId !== user.id) {
+    throw new HttpError(404, 'Withdrawal intent not found');
+  }
+
+  return {
+    withdrawal: serializeWithdrawalIntent(synchronizedIntent),
   };
 }
 
@@ -759,6 +1243,7 @@ async function transferUrnwayBalance(input: {
     entryType: 'send_debit',
     direction: 'debit',
     amountMinor: input.amountMinor,
+    status: 'completed',
     referenceType: input.referenceType,
     referenceId: input.referenceId,
     note: input.note ?? null,
@@ -769,6 +1254,7 @@ async function transferUrnwayBalance(input: {
     entryType: 'send_credit',
     direction: 'credit',
     amountMinor: input.amountMinor,
+    status: 'completed',
     referenceType: input.referenceType,
     referenceId: input.referenceId,
     note: input.note ?? null,
@@ -954,6 +1440,7 @@ async function reserveBookingFunds(input: {
     entryType: 'booking_reserve',
     direction: 'hold',
     amountMinor: input.amountMinor,
+    status: 'held',
     referenceType: 'booking_checkout',
     referenceId: input.referenceId,
     note: input.note ?? null,
@@ -981,6 +1468,7 @@ async function commitReservedBookingFunds(input: {
     entryType: 'booking_commit',
     direction: 'debit',
     amountMinor: input.amountMinor,
+    status: 'completed',
     referenceType: 'booking_checkout',
     referenceId: input.referenceId,
     note: input.note ?? null,
@@ -1009,6 +1497,7 @@ export async function releaseReservedBookingFunds(input: {
     entryType: 'booking_release',
     direction: 'release',
     amountMinor: input.amountMinor,
+    status: 'released',
     referenceType: 'booking_checkout',
     referenceId: input.referenceId,
     note: input.note ?? null,

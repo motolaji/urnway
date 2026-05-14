@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Linking,
   Pressable,
   Share,
   StyleSheet,
@@ -19,9 +20,11 @@ import {
 } from "@/lib/mobile-config";
 import {
   ApiError,
+  fetchBalanceActivity,
   completeSendCheckout,
   createPaymentLink,
   deletePaymentLink,
+  fetchBalanceWithdrawal,
   fetchBalanceTopup,
   fetchPublicPaymentQr,
   fetchPublicPaymentLink,
@@ -29,7 +32,10 @@ import {
   fetchPaymentsOverview,
   fetchUrnwayBalance,
   generatePaymentQr,
+  prepareBalanceWithdrawal,
   prepareSendCheckout,
+  submitBalanceWithdrawal,
+  type BalanceActivityItem,
   type PaymentLink,
   type PaymentSource,
   preflightPaymentLink,
@@ -39,6 +45,7 @@ import {
   type SendCheckout,
   submitPaymentLink,
   type PaymentLinkPreflight,
+  type BalanceWithdrawal,
   type UrnwayBalanceSummary,
 } from "@/lib/session";
 import { isCompletedTopup, runUrnwayTopupFlow } from "@/lib/topup-flow";
@@ -58,6 +65,7 @@ type PaymentsState = {
   } | null;
   paymentLinks: PaymentLink[];
   balance: UrnwayBalanceSummary | null;
+  balanceActivity: BalanceActivityItem[];
 };
 
 function formatTimestamp(value: string) {
@@ -83,13 +91,66 @@ function parseMinorAmount(value: string) {
   return Math.round(parsed * 100);
 }
 
+function formatActivityTitle(entryType: string) {
+  switch (entryType) {
+    case "topup_credit":
+      return "Top up received";
+    case "withdrawal_debit":
+      return "Withdrawal sent";
+    case "send_debit":
+      return "Sent from Urnway balance";
+    case "send_credit":
+      return "Received into Urnway balance";
+    case "booking_reserve":
+      return "Booking funds reserved";
+    case "booking_commit":
+      return "Booking charged";
+    case "booking_release":
+      return "Booking funds released";
+    default:
+      return entryType
+        .split("_")
+        .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+        .join(" ");
+  }
+}
+
+function formatActivityCounterparty(activity: BalanceActivityItem) {
+  if (!activity.counterparty) {
+    return null;
+  }
+
+  if (activity.entryType === "send_debit") {
+    return `To ${activity.counterparty.label}`;
+  }
+
+  if (activity.entryType === "send_credit") {
+    return `From ${activity.counterparty.label}`;
+  }
+
+  if (activity.entryType === "topup_credit") {
+    return activity.counterparty.walletAddress
+      ? `From ${activity.counterparty.walletAddress}`
+      : activity.counterparty.label;
+  }
+
+  if (activity.entryType === "withdrawal_debit") {
+    return activity.counterparty.walletAddress
+      ? `To ${activity.counterparty.walletAddress}`
+      : activity.counterparty.label;
+  }
+
+  return activity.counterparty.label;
+}
+
 export default function PayScreen() {
   const router = useRouter();
-  const { clearError, tokens } = useSession();
+  const { clearError, profile, tokens } = useSession();
   const [payments, setPayments] = useState<PaymentsState>({
     summary: null,
     paymentLinks: [],
     balance: null,
+    balanceActivity: [],
   });
   const [amount, setAmount] = useState("");
   const [title, setTitle] = useState("");
@@ -104,6 +165,7 @@ export default function PayScreen() {
     null
   );
   const [topupAmount, setTopupAmount] = useState("");
+  const [withdrawAmount, setWithdrawAmount] = useState("");
   const [sendSource, setSendSource] = useState<PaymentSource>("urnway_balance");
   const [sendCheckout, setSendCheckout] = useState<
     (SendCheckout & {
@@ -119,6 +181,9 @@ export default function PayScreen() {
   const [preflight, setPreflight] = useState<PaymentLinkPreflight["preflight"] | null>(
     null
   );
+  const [activeWithdrawal, setActiveWithdrawal] = useState<BalanceWithdrawal | null>(
+    null
+  );
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -130,6 +195,8 @@ export default function PayScreen() {
   const [isPreparingSendCheckout, setIsPreparingSendCheckout] = useState(false);
   const [isCompletingSendCheckout, setIsCompletingSendCheckout] = useState(false);
   const [isToppingUpBalance, setIsToppingUpBalance] = useState(false);
+  const [isPreparingWithdrawal, setIsPreparingWithdrawal] = useState(false);
+  const [isSubmittingWithdrawal, setIsSubmittingWithdrawal] = useState(false);
   const [busyLinkAction, setBusyLinkAction] = useState<{
     slug: string;
     action: "delete" | "reset";
@@ -148,6 +215,7 @@ export default function PayScreen() {
         : current.summary,
       paymentLinks: [paymentLink, ...current.paymentLinks],
       balance: current.balance,
+      balanceActivity: current.balanceActivity,
     }));
   }
 
@@ -159,16 +227,18 @@ export default function PayScreen() {
     setErrorMessage(null);
 
     try {
-      const [summary, paymentLinks, balance] = await Promise.all([
+      const [summary, paymentLinks, balance, balanceActivity] = await Promise.all([
         fetchPaymentsOverview(accessToken),
         fetchPaymentLinks(accessToken),
         fetchUrnwayBalance(accessToken),
+        fetchBalanceActivity(accessToken),
       ]);
 
       setPayments({
         summary,
         paymentLinks,
         balance,
+        balanceActivity,
       });
     } catch (error) {
       setErrorMessage(
@@ -190,6 +260,64 @@ export default function PayScreen() {
 
     void loadPayments(tokens.accessToken);
   }, [tokens?.accessToken]);
+
+  useEffect(() => {
+    if (!tokens?.accessToken || !activeWithdrawal || activeWithdrawal.status !== "submitted") {
+      return;
+    }
+
+    let active = true;
+    const interval = setInterval(() => {
+      void (async () => {
+        try {
+          const nextWithdrawal = await fetchBalanceWithdrawal(
+            activeWithdrawal.withdrawalId,
+            tokens.accessToken
+          );
+
+          if (!active) {
+            return;
+          }
+
+          setActiveWithdrawal(nextWithdrawal);
+
+          if (nextWithdrawal.status === "submitted") {
+            return;
+          }
+
+          clearInterval(interval);
+          if (nextWithdrawal.status === "completed") {
+            setWithdrawAmount("");
+            setTransactionMessage(
+              `Withdrawal completed for ${nextWithdrawal.amount} ${nextWithdrawal.currency}.`
+            );
+          } else if (nextWithdrawal.status === "failed") {
+            setErrorMessage(
+              nextWithdrawal.failureReason ||
+                "The treasury withdrawal failed before completion."
+            );
+          }
+          await loadPayments(tokens.accessToken, true);
+        } catch (error) {
+          if (!active) {
+            return;
+          }
+
+          clearInterval(interval);
+          setErrorMessage(
+            error instanceof ApiError
+              ? error.message
+              : "Could not refresh withdrawal status."
+          );
+        }
+      })();
+    }, 5000);
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [activeWithdrawal, tokens?.accessToken]);
 
   useEffect(() => {
     if (!previewLink || previewLink.status !== "submitted") {
@@ -401,6 +529,107 @@ export default function PayScreen() {
       );
     } finally {
       setIsToppingUpBalance(false);
+    }
+  }
+
+  async function handlePrepareWithdrawal() {
+    if (!tokens?.accessToken || isPreparingWithdrawal) {
+      return;
+    }
+
+    if (!payments.balance?.withdrawalsEnabled) {
+      setErrorMessage(
+        "Treasury signer is not configured yet, so withdrawals are disabled for now."
+      );
+      return;
+    }
+
+    if (!withdrawAmount.trim()) {
+      setErrorMessage("Enter a withdrawal amount first.");
+      return;
+    }
+
+    clearError();
+    setIsPreparingWithdrawal(true);
+    setErrorMessage(null);
+    setTransactionMessage(null);
+
+    try {
+      const result = await prepareBalanceWithdrawal(
+        {
+          amountMinor: parseMinorAmount(withdrawAmount),
+          currency: "MUSD",
+        },
+        tokens.accessToken
+      );
+
+      setActiveWithdrawal(result.withdrawal);
+    } catch (error) {
+      setActiveWithdrawal(null);
+      setErrorMessage(
+        error instanceof ApiError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "We could not prepare that withdrawal."
+      );
+    } finally {
+      setIsPreparingWithdrawal(false);
+    }
+  }
+
+  async function handleSubmitWithdrawal() {
+    if (!tokens?.accessToken || !activeWithdrawal || isSubmittingWithdrawal) {
+      return;
+    }
+
+    clearError();
+    setIsSubmittingWithdrawal(true);
+    setErrorMessage(null);
+    setTransactionMessage(null);
+
+    try {
+      const withdrawal = await submitBalanceWithdrawal(
+        activeWithdrawal.withdrawalId,
+        tokens.accessToken
+      );
+
+      setActiveWithdrawal(withdrawal);
+
+      if (withdrawal.status === "completed") {
+        setWithdrawAmount("");
+        setTransactionMessage(
+          `Withdrawal completed for ${withdrawal.amount} ${withdrawal.currency}.`
+        );
+      } else if (withdrawal.status === "submitted") {
+        setTransactionMessage(
+          "Withdrawal submitted from treasury. Waiting for confirmation."
+        );
+      } else if (withdrawal.status === "failed") {
+        setErrorMessage(
+          withdrawal.failureReason || "The treasury withdrawal could not be completed."
+        );
+      }
+
+      await loadPayments(tokens.accessToken, true);
+    } catch (error) {
+      setErrorMessage(
+        error instanceof ApiError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "We could not submit that withdrawal."
+      );
+    } finally {
+      setIsSubmittingWithdrawal(false);
+    }
+  }
+
+  async function handleOpenExplorer(url: string) {
+    try {
+      await Linking.openURL(url);
+    } catch {
+      setErrorMessage("Could not open the explorer link on this device.");
     }
   }
 
@@ -635,6 +864,7 @@ export default function PayScreen() {
           (paymentLink) => paymentLink.slug !== link.slug
         ),
         balance: current.balance,
+        balanceActivity: current.balanceActivity,
       }));
 
       if (previewLink?.slug === link.slug) {
@@ -892,6 +1122,108 @@ export default function PayScreen() {
             {isToppingUpBalance ? "Topping up..." : "Top up balance"}
           </Text>
         </Pressable>
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Withdraw to linked wallet</Text>
+        <Text style={styles.bodyText}>
+          Send MUSD back out of Urnway balance to your linked wallet with a
+          treasury-signed transfer.
+        </Text>
+        <Text style={styles.caption}>
+          Destination: {profile?.walletAddress ?? payments.balance?.externalWallet.walletAddress ?? "No linked wallet"}
+        </Text>
+        {!payments.balance?.withdrawalsEnabled ? (
+          <Text style={styles.caption}>
+            Treasury signer not configured yet. Set `URNWAY_TREASURY_PRIVATE_KEY`
+            in the API env before withdrawals can work.
+          </Text>
+        ) : null}
+
+        <TextInput
+          keyboardType="decimal-pad"
+          onChangeText={(value) => {
+            setWithdrawAmount(value);
+            setActiveWithdrawal(null);
+          }}
+          placeholder="Amount in MUSD"
+          placeholderTextColor="#8e7d71"
+          style={styles.input}
+          value={withdrawAmount}
+        />
+
+        <View style={styles.buttonRow}>
+          <Pressable
+            disabled={isPreparingWithdrawal || !payments.balance?.withdrawalsEnabled}
+            onPress={() => void handlePrepareWithdrawal()}
+            style={[
+              styles.secondaryButton,
+              (isPreparingWithdrawal || !payments.balance?.withdrawalsEnabled) &&
+                styles.disabledButton,
+            ]}
+          >
+            <Text style={styles.secondaryButtonText}>
+              {isPreparingWithdrawal ? "Reviewing..." : "Review withdrawal"}
+            </Text>
+          </Pressable>
+
+          {activeWithdrawal?.status === "prepared" ? (
+            <Pressable
+              disabled={isSubmittingWithdrawal}
+              onPress={() => void handleSubmitWithdrawal()}
+              style={[
+                styles.primaryButton,
+                isSubmittingWithdrawal && styles.disabledButton,
+              ]}
+            >
+              <Text style={styles.primaryButtonText}>
+                {isSubmittingWithdrawal ? "Submitting..." : "Confirm withdrawal"}
+              </Text>
+            </Pressable>
+          ) : null}
+        </View>
+
+        {activeWithdrawal ? (
+          <View style={styles.linkCard}>
+            <View style={styles.linkHeader}>
+              <View style={styles.linkHeaderText}>
+                <Text style={styles.linkAmount}>
+                  {activeWithdrawal.amount} {activeWithdrawal.currency}
+                </Text>
+                <Text style={styles.linkSlug}>{activeWithdrawal.withdrawalId}</Text>
+              </View>
+              <Text style={styles.linkStatus}>{activeWithdrawal.status}</Text>
+            </View>
+
+            <Text style={styles.bodyText}>
+              Destination wallet: {activeWithdrawal.destinationWalletAddress}
+            </Text>
+            <Text style={styles.bodyText}>
+              Treasury wallet: {activeWithdrawal.treasuryWalletAddress}
+            </Text>
+            {activeWithdrawal.failureReason ? (
+              <Text style={styles.errorText}>{activeWithdrawal.failureReason}</Text>
+            ) : null}
+            {activeWithdrawal.submittedAt ? (
+              <Text style={styles.caption}>
+                Submitted {formatTimestamp(activeWithdrawal.submittedAt)}
+              </Text>
+            ) : null}
+            {activeWithdrawal.completedAt ? (
+              <Text style={styles.caption}>
+                Completed {formatTimestamp(activeWithdrawal.completedAt)}
+              </Text>
+            ) : null}
+            {activeWithdrawal.explorerUrl ? (
+              <Pressable
+                onPress={() => void handleOpenExplorer(activeWithdrawal.explorerUrl!)}
+                style={styles.ghostButton}
+              >
+                <Text style={styles.ghostButtonText}>Open explorer link</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        ) : null}
       </View>
 
       <View style={styles.card}>
@@ -1393,10 +1725,70 @@ export default function PayScreen() {
 
       {transactionMessage ? (
         <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Balance activity</Text>
+          <Text style={styles.sectionTitle}>Latest update</Text>
           <Text style={styles.bodyText}>{transactionMessage}</Text>
         </View>
       ) : null}
+
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Balance activity</Text>
+        <Text style={styles.bodyText}>
+          Every Urnway-balance movement appears here, including top-ups,
+          withdrawals, sends, and booking debits.
+        </Text>
+
+        {payments.balanceActivity.length === 0 ? (
+          <Text style={styles.bodyText}>
+            No balance activity yet. Top up or send from Urnway balance to start the history.
+          </Text>
+        ) : (
+          payments.balanceActivity.map((activity) => {
+            const counterpartyLabel = formatActivityCounterparty(activity);
+            return (
+              <View key={activity.id} style={styles.linkCard}>
+                <View style={styles.activityHeader}>
+                  <View style={styles.linkHeaderText}>
+                    <Text style={styles.activityTitle}>
+                      {formatActivityTitle(activity.entryType)}
+                    </Text>
+                    <Text style={styles.linkSlug}>{formatTimestamp(activity.createdAt)}</Text>
+                  </View>
+                  <Text
+                    style={[
+                      styles.activityAmount,
+                      activity.direction === "credit"
+                        ? styles.successText
+                        : styles.warningText,
+                    ]}
+                  >
+                    {activity.direction === "credit" ? "+" : "-"}
+                    {activity.amount} {activity.currency}
+                  </Text>
+                </View>
+
+                <Text style={styles.caption}>Status: {activity.status}</Text>
+                {counterpartyLabel ? (
+                  <Text style={styles.bodyText}>{counterpartyLabel}</Text>
+                ) : null}
+                {activity.note ? <Text style={styles.bodyText}>{activity.note}</Text> : null}
+                {activity.txHash ? (
+                  <Text style={styles.caption}>
+                    Tx {activity.txHash.slice(0, 12)}...
+                  </Text>
+                ) : null}
+                {activity.explorerUrl ? (
+                  <Pressable
+                    onPress={() => void handleOpenExplorer(activity.explorerUrl!)}
+                    style={styles.ghostButton}
+                  >
+                    <Text style={styles.ghostButtonText}>Open explorer link</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            );
+          })
+        )}
+      </View>
 
       <View style={styles.card}>
         <Text style={styles.sectionTitle}>Your links</Text>
@@ -1698,6 +2090,21 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: "700",
     color: "#1b150f",
+  },
+  activityHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: 12,
+  },
+  activityTitle: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#1b150f",
+  },
+  activityAmount: {
+    fontSize: 15,
+    fontWeight: "700",
   },
   checkRow: {
     gap: 6,

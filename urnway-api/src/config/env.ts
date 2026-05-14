@@ -50,6 +50,7 @@ const envSchema = z.object({
   MEZO_CHAIN_ID: z.coerce.number().default(31611),
   MUSD_TOKEN_ADDRESS: z.string().min(1).optional(),
   URNWAY_TREASURY_WALLET_ADDRESS: z.string().min(1).optional(),
+  URNWAY_TREASURY_PRIVATE_KEY: z.string().min(1).optional(),
   DUFFEL_ACCESS_TOKEN: z.string().min(1).optional(),
   DUFFEL_API_BASE_URL: z.string().url().default('https://api.duffel.com'),
   LITEAPI_API_KEY: z.string().min(1).optional(),
@@ -84,6 +85,10 @@ export const env = envSchema.parse({
   URNWAY_TREASURY_WALLET_ADDRESS: sanitizeEnvValue(
     'URNWAY_TREASURY_WALLET_ADDRESS',
     process.env.URNWAY_TREASURY_WALLET_ADDRESS
+  ),
+  URNWAY_TREASURY_PRIVATE_KEY: sanitizeEnvValue(
+    'URNWAY_TREASURY_PRIVATE_KEY',
+    process.env.URNWAY_TREASURY_PRIVATE_KEY
   ),
   DUFFEL_ACCESS_TOKEN: sanitizeEnvValue(
     'DUFFEL_ACCESS_TOKEN',

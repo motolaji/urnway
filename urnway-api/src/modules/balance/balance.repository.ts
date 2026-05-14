@@ -1,10 +1,11 @@
-import { eq } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 
 import { db } from '../../db/client.js';
 import {
   balanceAccounts,
   balanceLedgerEntries,
   balanceTopupIntents,
+  balanceWithdrawalIntents,
   bookingCheckouts,
   sendCheckouts,
 } from '../../db/schema.js';
@@ -26,6 +27,11 @@ type CreateBalanceLedgerEntryInput = {
   direction: string;
   amountMinor: number;
   currency?: string;
+  status?: string;
+  txHash?: string | null;
+  chainId?: number | null;
+  explorerUrl?: string | null;
+  counterpartyWalletAddress?: string | null;
   referenceType?: string | null;
   referenceId?: string | null;
   note?: string | null;
@@ -46,6 +52,32 @@ type UpdateBalanceTopupIntentInput = Partial<{
   status: string;
   senderWalletAddress: string | null;
   txHash: string | null;
+  chainId: number | null;
+  explorerUrl: string | null;
+  completedAt: Date | null;
+  expiresAt: Date | null;
+}>;
+
+type CreateBalanceWithdrawalIntentInput = {
+  withdrawalId: string;
+  userId: string;
+  amountMinor: number;
+  currency?: string;
+  treasuryWalletAddress: string;
+  destinationWalletAddress: string;
+  tokenAddress: string;
+  chainId: number;
+  status?: string;
+  expiresAt?: Date | null;
+};
+
+type UpdateBalanceWithdrawalIntentInput = Partial<{
+  status: string;
+  txHash: string | null;
+  chainId: number | null;
+  explorerUrl: string | null;
+  failureReason: string | null;
+  submittedAt: Date | null;
   completedAt: Date | null;
   expiresAt: Date | null;
 }>;
@@ -145,6 +177,11 @@ export async function createBalanceLedgerEntry(input: CreateBalanceLedgerEntryIn
       direction: input.direction,
       amountMinor: input.amountMinor,
       currency: input.currency ?? 'MUSD',
+      status: input.status ?? 'completed',
+      txHash: input.txHash ?? null,
+      chainId: input.chainId ?? null,
+      explorerUrl: input.explorerUrl ?? null,
+      counterpartyWalletAddress: input.counterpartyWalletAddress ?? null,
       referenceType: input.referenceType ?? null,
       referenceId: input.referenceId ?? null,
       note: input.note ?? null,
@@ -166,6 +203,8 @@ export async function createBalanceTopupIntentRecord(
       currency: input.currency ?? 'MUSD',
       treasuryWalletAddress: input.treasuryWalletAddress,
       tokenAddress: input.tokenAddress,
+      chainId: null,
+      explorerUrl: null,
       status: input.status ?? 'prepared',
       expiresAt: input.expiresAt ?? null,
     })
@@ -208,6 +247,63 @@ export async function updateBalanceTopupIntentById(
     .returning();
 
   return topupIntent ?? null;
+}
+
+export async function createBalanceWithdrawalIntentRecord(
+  input: CreateBalanceWithdrawalIntentInput
+) {
+  const [withdrawalIntent] = await db
+    .insert(balanceWithdrawalIntents)
+    .values({
+      withdrawalId: input.withdrawalId,
+      userId: input.userId,
+      amountMinor: input.amountMinor,
+      currency: input.currency ?? 'MUSD',
+      treasuryWalletAddress: input.treasuryWalletAddress,
+      destinationWalletAddress: input.destinationWalletAddress,
+      tokenAddress: input.tokenAddress,
+      chainId: input.chainId,
+      status: input.status ?? 'prepared',
+      expiresAt: input.expiresAt ?? null,
+    })
+    .returning();
+
+  return withdrawalIntent;
+}
+
+export async function findBalanceWithdrawalIntentByWithdrawalId(withdrawalId: string) {
+  const [withdrawalIntent] = await db
+    .select()
+    .from(balanceWithdrawalIntents)
+    .where(eq(balanceWithdrawalIntents.withdrawalId, withdrawalId))
+    .limit(1);
+
+  return withdrawalIntent ?? null;
+}
+
+export async function updateBalanceWithdrawalIntentById(
+  id: string,
+  updates: UpdateBalanceWithdrawalIntentInput
+) {
+  const [withdrawalIntent] = await db
+    .update(balanceWithdrawalIntents)
+    .set({
+      ...updates,
+      updatedAt: new Date(),
+    })
+    .where(eq(balanceWithdrawalIntents.id, id))
+    .returning();
+
+  return withdrawalIntent ?? null;
+}
+
+export async function listBalanceLedgerEntriesByUserId(userId: string, limit = 50) {
+  return db
+    .select()
+    .from(balanceLedgerEntries)
+    .where(eq(balanceLedgerEntries.userId, userId))
+    .orderBy(desc(balanceLedgerEntries.createdAt))
+    .limit(limit);
 }
 
 export async function createSendCheckoutRecord(input: CreateSendCheckoutInput) {

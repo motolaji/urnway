@@ -143,6 +143,11 @@ export const balanceLedgerEntries = pgTable('balance_ledger_entries', {
   direction: text('direction').notNull(),
   amountMinor: integer('amount_minor').notNull(),
   currency: text('currency').default('MUSD').notNull(),
+  status: text('status').default('completed').notNull(),
+  txHash: text('tx_hash'),
+  chainId: integer('chain_id'),
+  explorerUrl: text('explorer_url'),
+  counterpartyWalletAddress: text('counterparty_wallet_address'),
   referenceType: text('reference_type'),
   referenceId: text('reference_id'),
   note: text('note'),
@@ -164,6 +169,35 @@ export const balanceTopupIntents = pgTable('balance_topup_intents', {
   tokenAddress: text('token_address').notNull(),
   senderWalletAddress: text('sender_wallet_address'),
   txHash: text('tx_hash').unique(),
+  chainId: integer('chain_id'),
+  explorerUrl: text('explorer_url'),
+  completedAt: timestamp('completed_at', { withTimezone: true }),
+  expiresAt: timestamp('expires_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+});
+
+export const balanceWithdrawalIntents = pgTable('balance_withdrawal_intents', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  withdrawalId: text('withdrawal_id').notNull().unique(),
+  userId: uuid('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  amountMinor: integer('amount_minor').notNull(),
+  currency: text('currency').default('MUSD').notNull(),
+  status: text('status').default('prepared').notNull(),
+  treasuryWalletAddress: text('treasury_wallet_address').notNull(),
+  destinationWalletAddress: text('destination_wallet_address').notNull(),
+  tokenAddress: text('token_address').notNull(),
+  txHash: text('tx_hash').unique(),
+  chainId: integer('chain_id'),
+  explorerUrl: text('explorer_url'),
+  failureReason: text('failure_reason'),
+  submittedAt: timestamp('submitted_at', { withTimezone: true }),
   completedAt: timestamp('completed_at', { withTimezone: true }),
   expiresAt: timestamp('expires_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true })

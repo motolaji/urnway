@@ -2,9 +2,11 @@ import * as SecureStore from "expo-secure-store";
 import { Platform } from "react-native";
 
 import type {
+  BalanceActivityItem,
   AuthPayload,
   BalanceAccount,
   BalanceTopup,
+  BalanceWithdrawal,
   BoardingPass,
   BookingCheckout,
   Booking,
@@ -41,7 +43,9 @@ const BOARDING_PASS_CACHE_LIMIT = 8;
 
 export type {
   BalanceAccount,
+  BalanceActivityItem,
   BalanceTopup,
+  BalanceWithdrawal,
   BoardingPass,
   BookingCheckout,
   Booking,
@@ -269,6 +273,10 @@ type UrnwayBalanceResponse = {
   balance: UrnwayBalanceSummary;
 };
 
+type BalanceActivityResponse = {
+  activity: BalanceActivityItem[];
+};
+
 type BalanceTopupResponse = {
   topup: BalanceTopup;
 };
@@ -278,6 +286,15 @@ type PrepareBalanceTopupResponse = {
   funding: {
     preflight: PaymentLinkPreflight["preflight"];
   };
+};
+
+type BalanceWithdrawalResponse = {
+  withdrawal: BalanceWithdrawal;
+};
+
+type PrepareBalanceWithdrawalResponse = {
+  withdrawal: BalanceWithdrawal;
+  balance: BalanceAccount;
 };
 
 type SendCheckoutResponse = {
@@ -519,6 +536,12 @@ export function fetchUrnwayBalance(accessToken: string) {
   }).then((data) => data.balance);
 }
 
+export function fetchBalanceActivity(accessToken: string) {
+  return apiRequest<BalanceActivityResponse>("/v1/balance/activity", {
+    accessToken,
+  }).then((data) => data.activity);
+}
+
 export function prepareBalanceTopup(
   input: {
     amountMinor: number;
@@ -552,6 +575,40 @@ export function fetchBalanceTopup(topupId: string, accessToken: string) {
   return apiRequest<BalanceTopupResponse>(`/v1/balance/topups/${topupId}`, {
     accessToken,
   }).then((data) => data.topup);
+}
+
+export function prepareBalanceWithdrawal(
+  input: {
+    amountMinor: number;
+    currency: string;
+  },
+  accessToken: string
+) {
+  return apiRequest<PrepareBalanceWithdrawalResponse>("/v1/balance/withdrawals/prepare", {
+    method: "POST",
+    body: input,
+    accessToken,
+  });
+}
+
+export function submitBalanceWithdrawal(withdrawalId: string, accessToken: string) {
+  return apiRequest<BalanceWithdrawalResponse>(
+    `/v1/balance/withdrawals/${withdrawalId}/submit`,
+    {
+      method: "POST",
+      body: {},
+      accessToken,
+    }
+  ).then((data) => data.withdrawal);
+}
+
+export function fetchBalanceWithdrawal(withdrawalId: string, accessToken: string) {
+  return apiRequest<BalanceWithdrawalResponse>(
+    `/v1/balance/withdrawals/${withdrawalId}`,
+    {
+      accessToken,
+    }
+  ).then((data) => data.withdrawal);
 }
 
 export function fetchWalletPosition(accessToken: string) {
